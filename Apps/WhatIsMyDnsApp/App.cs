@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,7 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
-using DnsApplicationCommon;
+using DnsServerCore.ApplicationCommon;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
@@ -26,7 +26,7 @@ using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace WhatIsMyDns
 {
-    public class App : IDnsApplicationRequestHandler
+    public class App : IDnsApplication, IDnsAppRecordRequestHandler
     {
         #region IDisposable
 
@@ -45,7 +45,7 @@ namespace WhatIsMyDns
             return Task.CompletedTask;
         }
 
-        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, string zoneName, uint appRecordTtl, string appRecordData, bool isRecursionAllowed, IDnsServer dnsServer)
+        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, string appRecordName, uint appRecordTtl, string appRecordData)
         {
             DnsResourceRecord answer;
 
@@ -55,18 +55,18 @@ namespace WhatIsMyDns
                     if (remoteEP.AddressFamily != AddressFamily.InterNetwork)
                         return Task.FromResult<DnsDatagram>(null);
 
-                    answer = new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.A, DnsClass.IN, appRecordTtl, new DnsARecord(remoteEP.Address));
+                    answer = new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.A, DnsClass.IN, appRecordTtl, new DnsARecordData(remoteEP.Address));
                     break;
 
                 case DnsResourceRecordType.AAAA:
                     if (remoteEP.AddressFamily != AddressFamily.InterNetworkV6)
                         return Task.FromResult<DnsDatagram>(null);
 
-                    answer = new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.AAAA, DnsClass.IN, appRecordTtl, new DnsAAAARecord(remoteEP.Address));
+                    answer = new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.AAAA, DnsClass.IN, appRecordTtl, new DnsAAAARecordData(remoteEP.Address));
                     break;
 
                 case DnsResourceRecordType.TXT:
-                    answer = new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.TXT, DnsClass.IN, appRecordTtl, new DnsTXTRecord(remoteEP.Address.ToString()));
+                    answer = new DnsResourceRecord(request.Question[0].Name, DnsResourceRecordType.TXT, DnsClass.IN, appRecordTtl, new DnsTXTRecordData(remoteEP.Address.ToString()));
                     break;
 
                 default:

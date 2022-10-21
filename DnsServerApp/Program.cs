@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -43,15 +43,15 @@ namespace DnsServerApp
                 switch (Environment.OSVersion.Platform)
                 {
                     case PlatformID.Win32NT:
-                        updateCheckUri = new Uri("https://go.technitium.com/?id=20");
+                        updateCheckUri = new Uri("https://go.technitium.com/?id=41");
                         break;
 
                     default:
-                        updateCheckUri = new Uri("https://go.technitium.com/?id=21");
+                        updateCheckUri = new Uri("https://go.technitium.com/?id=42");
                         break;
                 }
 
-                service = new DnsWebService(configFolder, updateCheckUri, new Uri("https://go.technitium.com/?id=40"));
+                service = new DnsWebService(configFolder, updateCheckUri, new Uri("https://go.technitium.com/?id=44"));
                 service.Start();
 
                 Console.CancelKeyPress += delegate (object sender, ConsoleCancelEventArgs e)

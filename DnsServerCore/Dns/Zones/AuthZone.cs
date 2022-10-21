@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -20,15 +20,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 using DnsServerCore.Dns.ResourceRecords;
 using System;
 using System.Collections.Generic;
-using System.Net;
-using System.Threading.Tasks;
-using TechnitiumLibrary.IO;
-using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Dns.Zones
 {
-    abstract class AuthZone : Zone, IDisposable
+    abstract class AuthZone : Zone
     {
         #region variables
 
@@ -38,21 +35,15 @@ namespace DnsServerCore.Dns.Zones
 
         #region constructor
 
+        protected AuthZone(AuthZoneInfo zoneInfo)
+            : base(zoneInfo.Name)
+        {
+            _disabled = zoneInfo.Disabled;
+        }
+
         protected AuthZone(string name)
             : base(name)
         { }
-
-        #endregion
-
-        #region IDisposable
-
-        protected virtual void Dispose(bool disposing)
-        { }
-
-        public void Dispose()
-        {
-            Dispose(true);
-        }
 
         #endregion
 
@@ -67,6 +58,9 @@ namespace DnsServerCore.Dns.Zones
             {
                 if (records[0].IsDisabled())
                     return Array.Empty<DnsResourceRecord>(); //record disabled
+
+                //update last used on
+                records[0].GetRecordInfo().LastUsedOn = DateTime.UtcNow;
 
                 return records;
             }
@@ -93,153 +87,544 @@ namespace DnsServerCore.Dns.Zones
                 }
             }
 
+            //update last used on
+            DateTime utcNow = DateTime.UtcNow;
+
+            foreach (DnsResourceRecord record in newRecords)
+                record.GetRecordInfo().LastUsedOn = utcNow;
+
             return newRecords;
         }
 
-        private static async Task<IReadOnlyList<NameServerAddress>> GetNameServerAddressesAsync(DnsServer dnsServer, DnsResourceRecord record)
+        private IReadOnlyList<DnsResourceRecord> AppendRRSigTo(IReadOnlyList<DnsResourceRecord> records)
         {
-            string nsDomain;
+            IReadOnlyList<DnsResourceRecord> rrsigRecords = GetRecords(DnsResourceRecordType.RRSIG);
+            if (rrsigRecords.Count == 0)
+                return records;
 
-            switch (record.Type)
+            DnsResourceRecordType type = records[0].Type;
+            List<DnsResourceRecord> newRecords = new List<DnsResourceRecord>(records.Count + 2);
+            newRecords.AddRange(records);
+
+            DateTime utcNow = DateTime.UtcNow;
+
+            foreach (DnsResourceRecord rrsigRecord in rrsigRecords)
             {
-                case DnsResourceRecordType.NS:
-                    nsDomain = (record.RDATA as DnsNSRecord).NameServer;
-                    break;
-
-                case DnsResourceRecordType.SOA:
-                    nsDomain = (record.RDATA as DnsSOARecord).PrimaryNameServer;
-                    break;
-
-                default:
-                    throw new InvalidOperationException();
+                if ((rrsigRecord.RDATA as DnsRRSIGRecordData).TypeCovered == type)
+                {
+                    rrsigRecord.GetRecordInfo().LastUsedOn = utcNow;
+                    newRecords.Add(rrsigRecord);
+                }
             }
 
-            List<NameServerAddress> nameServers = new List<NameServerAddress>(2);
+            return newRecords;
+        }
 
-            IReadOnlyList<DnsResourceRecord> glueRecords = record.GetGlueRecords();
-            if (glueRecords.Count > 0)
+        #endregion
+
+        #region versioning
+
+        internal bool TrySetRecords(DnsResourceRecordType type, IReadOnlyList<DnsResourceRecord> records, out IReadOnlyList<DnsResourceRecord> deletedRecords)
+        {
+            if (_entries.TryGetValue(type, out IReadOnlyList<DnsResourceRecord> existingRecords))
             {
-                foreach (DnsResourceRecord glueRecord in glueRecords)
-                {
-                    switch (glueRecord.Type)
-                    {
-                        case DnsResourceRecordType.A:
-                            nameServers.Add(new NameServerAddress(nsDomain, (glueRecord.RDATA as DnsARecord).Address));
-                            break;
-
-                        case DnsResourceRecordType.AAAA:
-                            if (dnsServer.PreferIPv6)
-                                nameServers.Add(new NameServerAddress(nsDomain, (glueRecord.RDATA as DnsAAAARecord).Address));
-
-                            break;
-                    }
-                }
+                deletedRecords = existingRecords;
+                return _entries.TryUpdate(type, records, existingRecords);
             }
             else
             {
-                //resolve addresses
-                try
-                {
-                    DnsDatagram response = await dnsServer.DirectQueryAsync(new DnsQuestionRecord(nsDomain, DnsResourceRecordType.A, DnsClass.IN));
-                    if ((response != null) && (response.Answer.Count > 0))
-                    {
-                        IReadOnlyList<IPAddress> addresses = DnsClient.ParseResponseA(response);
-                        foreach (IPAddress address in addresses)
-                            nameServers.Add(new NameServerAddress(nsDomain, address));
-                    }
-                }
-                catch
-                { }
+                deletedRecords = Array.Empty<DnsResourceRecord>();
+                return _entries.TryAdd(type, records);
+            }
+        }
 
-                if (dnsServer.PreferIPv6)
+        internal bool TryDeleteRecord(DnsResourceRecordType type, DnsResourceRecordData rdata, out DnsResourceRecord deletedRecord)
+        {
+            if (_entries.TryGetValue(type, out IReadOnlyList<DnsResourceRecord> existingRecords))
+            {
+                if (existingRecords.Count == 1)
                 {
-                    try
+                    if (rdata.Equals(existingRecords[0].RDATA))
                     {
-                        DnsDatagram response = await dnsServer.DirectQueryAsync(new DnsQuestionRecord(nsDomain, DnsResourceRecordType.AAAA, DnsClass.IN));
-                        if ((response != null) && (response.Answer.Count > 0))
+                        if (_entries.TryRemove(type, out IReadOnlyList<DnsResourceRecord> removedRecords))
                         {
-                            IReadOnlyList<IPAddress> addresses = DnsClient.ParseResponseAAAA(response);
-                            foreach (IPAddress address in addresses)
-                                nameServers.Add(new NameServerAddress(nsDomain, address));
+                            deletedRecord = removedRecords[0];
+                            return true;
                         }
                     }
-                    catch
-                    { }
+                }
+                else
+                {
+                    deletedRecord = null;
+                    List<DnsResourceRecord> updatedRecords = new List<DnsResourceRecord>(existingRecords.Count);
+
+                    foreach (DnsResourceRecord existingRecord in existingRecords)
+                    {
+                        if ((deletedRecord is null) && rdata.Equals(existingRecord.RDATA))
+                            deletedRecord = existingRecord;
+                        else
+                            updatedRecords.Add(existingRecord);
+                    }
+
+                    if (deletedRecord is null)
+                        return false; //not found
+
+                    return _entries.TryUpdate(type, updatedRecords, existingRecords);
                 }
             }
 
-            return nameServers;
+            deletedRecord = null;
+            return false;
+        }
+
+        internal bool TryDeleteRecords(DnsResourceRecordType type, IReadOnlyList<DnsResourceRecord> records, out IReadOnlyList<DnsResourceRecord> deletedRecords)
+        {
+            if (_entries.TryGetValue(type, out IReadOnlyList<DnsResourceRecord> existingRecords))
+            {
+                if (existingRecords.Count == 1)
+                {
+                    DnsResourceRecord existingRecord = existingRecords[0];
+
+                    foreach (DnsResourceRecord record in records)
+                    {
+                        if (record.RDATA.Equals(existingRecord.RDATA))
+                        {
+                            if (_entries.TryRemove(type, out IReadOnlyList<DnsResourceRecord> removedRecords))
+                            {
+                                deletedRecords = removedRecords;
+                                return true;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    List<DnsResourceRecord> deleted = new List<DnsResourceRecord>(records.Count);
+                    List<DnsResourceRecord> updatedRecords = new List<DnsResourceRecord>(existingRecords.Count);
+
+                    foreach (DnsResourceRecord existingRecord in existingRecords)
+                    {
+                        bool found = false;
+
+                        foreach (DnsResourceRecord record in records)
+                        {
+                            if (record.RDATA.Equals(existingRecord.RDATA))
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+
+                        if (found)
+                            deleted.Add(existingRecord);
+                        else
+                            updatedRecords.Add(existingRecord);
+                    }
+
+                    if (deleted.Count > 0)
+                    {
+                        deletedRecords = deleted;
+
+                        if (updatedRecords.Count > 0)
+                            return _entries.TryUpdate(type, updatedRecords, existingRecords);
+
+                        return _entries.TryRemove(type, out _);
+                    }
+                }
+            }
+
+            deletedRecords = null;
+            return false;
+        }
+
+        internal void AddOrUpdateRRSigRecords(IReadOnlyList<DnsResourceRecord> newRRSigRecords, out IReadOnlyList<DnsResourceRecord> deletedRRSigRecords)
+        {
+            IReadOnlyList<DnsResourceRecord> deleted = null;
+
+            _entries.AddOrUpdate(DnsResourceRecordType.RRSIG, delegate (DnsResourceRecordType key)
+            {
+                deleted = Array.Empty<DnsResourceRecord>();
+                return newRRSigRecords;
+            },
+            delegate (DnsResourceRecordType key, IReadOnlyList<DnsResourceRecord> existingRecords)
+            {
+                List<DnsResourceRecord> updatedRecords = new List<DnsResourceRecord>(existingRecords.Count + newRRSigRecords.Count);
+                List<DnsResourceRecord> deletedRecords = new List<DnsResourceRecord>();
+
+                foreach (DnsResourceRecord existingRecord in existingRecords)
+                {
+                    bool found = false;
+                    DnsRRSIGRecordData existingRRSig = existingRecord.RDATA as DnsRRSIGRecordData;
+
+                    foreach (DnsResourceRecord newRRSigRecord in newRRSigRecords)
+                    {
+                        DnsRRSIGRecordData newRRSig = newRRSigRecord.RDATA as DnsRRSIGRecordData;
+
+                        if ((newRRSig.TypeCovered == existingRRSig.TypeCovered) && (newRRSig.KeyTag == existingRRSig.KeyTag))
+                        {
+                            deletedRecords.Add(existingRecord);
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if (!found)
+                        updatedRecords.Add(existingRecord);
+                }
+
+                updatedRecords.AddRange(newRRSigRecords);
+
+                deleted = deletedRecords;
+                return updatedRecords;
+            });
+
+            deletedRRSigRecords = deleted;
+        }
+
+        internal void AddRecord(DnsResourceRecord record, out IReadOnlyList<DnsResourceRecord> addedRecords, out IReadOnlyList<DnsResourceRecord> deletedRecords)
+        {
+            switch (record.Type)
+            {
+                case DnsResourceRecordType.CNAME:
+                case DnsResourceRecordType.DNAME:
+                case DnsResourceRecordType.SOA:
+                    throw new InvalidOperationException("Cannot add record: use SetRecords() for " + record.Type.ToString() + " record");
+            }
+
+            List<DnsResourceRecord> added = new List<DnsResourceRecord>();
+            List<DnsResourceRecord> deleted = new List<DnsResourceRecord>();
+
+            addedRecords = added;
+            deletedRecords = deleted;
+
+            _entries.AddOrUpdate(record.Type, delegate (DnsResourceRecordType key)
+            {
+                added.Add(record);
+                return new DnsResourceRecord[] { record };
+            },
+            delegate (DnsResourceRecordType key, IReadOnlyList<DnsResourceRecord> existingRecords)
+            {
+                foreach (DnsResourceRecord existingRecord in existingRecords)
+                {
+                    if (record.RDATA.Equals(existingRecord.RDATA))
+                        return existingRecords;
+                }
+
+                List<DnsResourceRecord> updatedRecords = new List<DnsResourceRecord>(existingRecords.Count + 1);
+
+                foreach (DnsResourceRecord existingRecord in existingRecords)
+                {
+                    if (existingRecord.OriginalTtlValue == record.OriginalTtlValue)
+                    {
+                        updatedRecords.Add(existingRecord);
+                    }
+                    else
+                    {
+                        DnsResourceRecord updatedExistingRecord = new DnsResourceRecord(existingRecord.Name, existingRecord.Type, existingRecord.Class, record.OriginalTtlValue, existingRecord.RDATA);
+                        updatedRecords.Add(updatedExistingRecord);
+
+                        added.Add(updatedExistingRecord);
+                        deleted.Add(existingRecord);
+                    }
+                }
+
+                updatedRecords.Add(record);
+
+                added.Add(record);
+                return updatedRecords;
+            });
+        }
+
+        #endregion
+
+        #region DNSSEC
+
+        internal IReadOnlyList<DnsResourceRecord> SignAllRRSets()
+        {
+            List<DnsResourceRecord> rrsigRecords = new List<DnsResourceRecord>(_entries.Count);
+
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+            {
+                if (entry.Key == DnsResourceRecordType.RRSIG)
+                    continue;
+
+                rrsigRecords.AddRange(SignRRSet(entry.Value));
+            }
+
+            return rrsigRecords;
+        }
+
+        internal IReadOnlyList<DnsResourceRecord> RemoveAllDnssecRecords()
+        {
+            List<DnsResourceRecord> allRemovedRecords = new List<DnsResourceRecord>();
+
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+            {
+                switch (entry.Key)
+                {
+                    case DnsResourceRecordType.DNSKEY:
+                    case DnsResourceRecordType.RRSIG:
+                    case DnsResourceRecordType.NSEC:
+                    case DnsResourceRecordType.NSEC3PARAM:
+                    case DnsResourceRecordType.NSEC3:
+                        if (_entries.TryRemove(entry.Key, out IReadOnlyList<DnsResourceRecord> removedRecords))
+                            allRemovedRecords.AddRange(removedRecords);
+
+                        break;
+                }
+            }
+
+            return allRemovedRecords;
+        }
+
+        internal IReadOnlyList<DnsResourceRecord> RemoveNSecRecordsWithRRSig()
+        {
+            List<DnsResourceRecord> allRemovedRecords = new List<DnsResourceRecord>(2);
+
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+            {
+                switch (entry.Key)
+                {
+                    case DnsResourceRecordType.NSEC:
+                        if (_entries.TryRemove(entry.Key, out IReadOnlyList<DnsResourceRecord> removedRecords))
+                            allRemovedRecords.AddRange(removedRecords);
+
+                        break;
+
+                    case DnsResourceRecordType.RRSIG:
+                        List<DnsResourceRecord> recordsToRemove = new List<DnsResourceRecord>(1);
+
+                        foreach (DnsResourceRecord rrsigRecord in entry.Value)
+                        {
+                            DnsRRSIGRecordData rrsig = rrsigRecord.RDATA as DnsRRSIGRecordData;
+                            if (rrsig.TypeCovered == DnsResourceRecordType.NSEC)
+                                recordsToRemove.Add(rrsigRecord);
+                        }
+
+                        if (recordsToRemove.Count > 0)
+                        {
+                            if (TryDeleteRecords(DnsResourceRecordType.RRSIG, recordsToRemove, out IReadOnlyList<DnsResourceRecord> deletedRecords))
+                                allRemovedRecords.AddRange(deletedRecords);
+                        }
+
+                        break;
+                }
+            }
+
+            return allRemovedRecords;
+        }
+
+        internal IReadOnlyList<DnsResourceRecord> RemoveNSec3RecordsWithRRSig()
+        {
+            List<DnsResourceRecord> allRemovedRecords = new List<DnsResourceRecord>(2);
+
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+            {
+                switch (entry.Key)
+                {
+                    case DnsResourceRecordType.NSEC3:
+                    case DnsResourceRecordType.NSEC3PARAM:
+                        if (_entries.TryRemove(entry.Key, out IReadOnlyList<DnsResourceRecord> removedRecords))
+                            allRemovedRecords.AddRange(removedRecords);
+
+                        break;
+
+                    case DnsResourceRecordType.RRSIG:
+                        List<DnsResourceRecord> recordsToRemove = new List<DnsResourceRecord>(1);
+
+                        foreach (DnsResourceRecord rrsigRecord in entry.Value)
+                        {
+                            DnsRRSIGRecordData rrsig = rrsigRecord.RDATA as DnsRRSIGRecordData;
+                            switch (rrsig.TypeCovered)
+                            {
+                                case DnsResourceRecordType.NSEC3:
+                                case DnsResourceRecordType.NSEC3PARAM:
+                                    recordsToRemove.Add(rrsigRecord);
+                                    break;
+                            }
+                        }
+
+                        if (recordsToRemove.Count > 0)
+                        {
+                            if (TryDeleteRecords(DnsResourceRecordType.RRSIG, recordsToRemove, out IReadOnlyList<DnsResourceRecord> deletedRecords))
+                                allRemovedRecords.AddRange(deletedRecords);
+                        }
+
+                        break;
+                }
+            }
+
+            return allRemovedRecords;
+        }
+
+        internal bool HasOnlyNSec3Records()
+        {
+            if (!_entries.ContainsKey(DnsResourceRecordType.NSEC3))
+                return false;
+
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+            {
+                switch (entry.Key)
+                {
+                    case DnsResourceRecordType.NSEC3:
+                    case DnsResourceRecordType.RRSIG:
+                        break;
+
+                    default:
+                        //found non NSEC3 records
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
+        internal IReadOnlyList<DnsResourceRecord> RefreshSignatures()
+        {
+            if (!_entries.TryGetValue(DnsResourceRecordType.RRSIG, out IReadOnlyList<DnsResourceRecord> rrsigRecords))
+                throw new InvalidOperationException();
+
+            List<DnsResourceRecordType> typesToRefresh = new List<DnsResourceRecordType>();
+            DateTime utcNow = DateTime.UtcNow;
+
+            foreach (DnsResourceRecord rrsigRecord in rrsigRecords)
+            {
+                DnsRRSIGRecordData rrsig = rrsigRecord.RDATA as DnsRRSIGRecordData;
+
+                uint signatureValidityPeriod = rrsig.SignatureExpirationValue - rrsig.SignatureInceptionValue;
+                uint refreshPeriod = signatureValidityPeriod / 3;
+
+                if (utcNow > DateTime.UnixEpoch.AddSeconds(rrsig.SignatureExpirationValue - refreshPeriod))
+                    typesToRefresh.Add(rrsig.TypeCovered);
+            }
+
+            List<DnsResourceRecord> newRRSigRecords = new List<DnsResourceRecord>(typesToRefresh.Count);
+
+            foreach (DnsResourceRecordType type in typesToRefresh)
+            {
+                if (_entries.TryGetValue(type, out IReadOnlyList<DnsResourceRecord> records))
+                    newRRSigRecords.AddRange(SignRRSet(records));
+            }
+
+            return newRRSigRecords;
+        }
+
+        internal virtual IReadOnlyList<DnsResourceRecord> SignRRSet(IReadOnlyList<DnsResourceRecord> records)
+        {
+            throw new InvalidOperationException();
+        }
+
+        internal IReadOnlyList<DnsResourceRecord> GetUpdatedNSecRRSet(string nextDomainName, uint ttl)
+        {
+            List<DnsResourceRecordType> types = new List<DnsResourceRecordType>(_entries.Count);
+
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+                types.Add(entry.Key);
+
+            if (!_entries.ContainsKey(DnsResourceRecordType.NSEC))
+                types.Add(DnsResourceRecordType.NSEC);
+
+            if (!_entries.ContainsKey(DnsResourceRecordType.RRSIG))
+                types.Add(DnsResourceRecordType.RRSIG);
+
+            types.Sort();
+
+            DnsNSECRecordData newNSecRecord = new DnsNSECRecordData(nextDomainName, types);
+
+            if (!_entries.TryGetValue(DnsResourceRecordType.NSEC, out IReadOnlyList<DnsResourceRecord> existingRecords) || (existingRecords[0].TtlValue != ttl) || !existingRecords[0].RDATA.Equals(newNSecRecord))
+                return new DnsResourceRecord[] { new DnsResourceRecord(_name, DnsResourceRecordType.NSEC, DnsClass.IN, ttl, newNSecRecord) };
+
+            return Array.Empty<DnsResourceRecord>();
+        }
+
+        internal IReadOnlyList<DnsResourceRecord> GetUpdatedNSec3RRSet(IReadOnlyList<DnsResourceRecord> newNSec3Records)
+        {
+            if (!_entries.TryGetValue(DnsResourceRecordType.NSEC3, out IReadOnlyList<DnsResourceRecord> existingRecords) || (existingRecords[0].TtlValue != newNSec3Records[0].TtlValue) || !existingRecords[0].RDATA.Equals(newNSec3Records[0].RDATA))
+                return newNSec3Records;
+
+            return Array.Empty<DnsResourceRecord>();
+        }
+
+        internal IReadOnlyList<DnsResourceRecord> CreateNSec3RRSet(string hashedOwnerName, byte[] nextHashedOwnerName, uint ttl, ushort iterations, byte[] salt)
+        {
+            List<DnsResourceRecordType> types = new List<DnsResourceRecordType>(_entries.Count);
+
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+            {
+                switch (entry.Key)
+                {
+                    case DnsResourceRecordType.NSEC3:
+                    case DnsResourceRecordType.RRSIG:
+                        continue;
+
+                    default:
+                        types.Add(entry.Key);
+                        break;
+                }
+            }
+
+            if (types.Count > 0)
+            {
+                //zone is not an empty non-terminal (ENT)
+                if (!_entries.ContainsKey(DnsResourceRecordType.RRSIG))
+                    types.Add(DnsResourceRecordType.RRSIG);
+            }
+
+            types.Sort();
+
+            DnsNSEC3RecordData newNSec3 = new DnsNSEC3RecordData(DnssecNSEC3HashAlgorithm.SHA1, DnssecNSEC3Flags.None, iterations, salt, nextHashedOwnerName, types);
+            return new DnsResourceRecord[] { new DnsResourceRecord(hashedOwnerName, DnsResourceRecordType.NSEC3, DnsClass.IN, ttl, newNSec3) };
+        }
+
+        internal DnsResourceRecord GetPartialNSec3Record(string zoneName, uint ttl, ushort iterations, byte[] salt)
+        {
+            List<DnsResourceRecordType> types = new List<DnsResourceRecordType>(_entries.Count);
+
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+            {
+                switch (entry.Key)
+                {
+                    case DnsResourceRecordType.NSEC3:
+                    case DnsResourceRecordType.RRSIG:
+                        continue;
+
+                    default:
+                        types.Add(entry.Key);
+                        break;
+                }
+            }
+
+            if (_name.Equals(zoneName, StringComparison.OrdinalIgnoreCase))
+            {
+                types.Add(DnsResourceRecordType.NSEC3PARAM); //add NSEC3PARAM type to NSEC3 for unsigned zone apex
+
+                if (!_entries.ContainsKey(DnsResourceRecordType.RRSIG))
+                    types.Add(DnsResourceRecordType.RRSIG);
+            }
+            else if (types.Count > 0)
+            {
+                //zone is not an empty non-terminal (ENT)
+                if (!_entries.ContainsKey(DnsResourceRecordType.RRSIG))
+                    types.Add(DnsResourceRecordType.RRSIG);
+            }
+
+            types.Sort();
+
+            DnsNSEC3RecordData newNSec3Record = new DnsNSEC3RecordData(DnssecNSEC3HashAlgorithm.SHA1, DnssecNSEC3Flags.None, iterations, salt, Array.Empty<byte>(), types);
+            return new DnsResourceRecord(newNSec3Record.ComputeHashedOwnerName(_name) + (zoneName.Length > 0 ? "." + zoneName : ""), DnsResourceRecordType.NSEC3, DnsClass.IN, ttl, newNSec3Record);
         }
 
         #endregion
 
         #region public
 
-        public async Task<IReadOnlyList<NameServerAddress>> GetPrimaryNameServerAddressesAsync(DnsServer dnsServer)
+        public void SyncRecords(Dictionary<DnsResourceRecordType, List<DnsResourceRecord>> newEntries)
         {
-            List<NameServerAddress> nameServers = new List<NameServerAddress>();
-
-            DnsResourceRecord soaRecord = _entries[DnsResourceRecordType.SOA][0];
-            DnsSOARecord soa = soaRecord.RDATA as DnsSOARecord;
-            IReadOnlyList<DnsResourceRecord> nsRecords = GetRecords(DnsResourceRecordType.NS); //stub zone has no authority so cant use QueryRecords
-
-            foreach (DnsResourceRecord nsRecord in nsRecords)
+            //remove entires of type that do not exists in new entries
+            foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
             {
-                if (nsRecord.IsDisabled())
-                    continue;
-
-                string nsDomain = (nsRecord.RDATA as DnsNSRecord).NameServer;
-
-                if (soa.PrimaryNameServer.Equals(nsDomain, StringComparison.OrdinalIgnoreCase))
-                {
-                    //found primary NS
-                    nameServers.AddRange(await GetNameServerAddressesAsync(dnsServer, nsRecord));
-                    break;
-                }
-            }
-
-            foreach (NameServerAddress nameServer in await GetNameServerAddressesAsync(dnsServer, soaRecord))
-            {
-                if (!nameServers.Contains(nameServer))
-                    nameServers.Add(nameServer);
-            }
-
-            return nameServers;
-        }
-
-        public async Task<IReadOnlyList<NameServerAddress>> GetSecondaryNameServerAddressesAsync(DnsServer dnsServer)
-        {
-            List<NameServerAddress> nameServers = new List<NameServerAddress>();
-
-            DnsSOARecord soa = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecord;
-            IReadOnlyList<DnsResourceRecord> nsRecords = GetRecords(DnsResourceRecordType.NS); //stub zone has no authority so cant use QueryRecords
-
-            foreach (DnsResourceRecord nsRecord in nsRecords)
-            {
-                if (nsRecord.IsDisabled())
-                    continue;
-
-                string nsDomain = (nsRecord.RDATA as DnsNSRecord).NameServer;
-
-                if (soa.PrimaryNameServer.Equals(nsDomain, StringComparison.OrdinalIgnoreCase))
-                    continue; //skip primary name server
-
-                nameServers.AddRange(await GetNameServerAddressesAsync(dnsServer, nsRecord));
-            }
-
-            return nameServers;
-        }
-
-        public void SyncRecords(Dictionary<DnsResourceRecordType, List<DnsResourceRecord>> newEntries, bool dontRemoveRecords)
-        {
-            if (!dontRemoveRecords)
-            {
-                //remove entires of type that do not exists in new entries
-                foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
-                {
-                    if (!newEntries.ContainsKey(entry.Key))
-                        _entries.TryRemove(entry.Key, out _);
-                }
+                if (!newEntries.ContainsKey(entry.Key))
+                    _entries.TryRemove(entry.Key, out _);
             }
 
             //set new entries into zone
@@ -269,15 +654,101 @@ namespace DnsServerCore.Dns.Zones
                         if (newEntry.Value.Count != 1)
                             continue; //skip invalid SOA record
 
-                        if ((this is SecondaryZone) || (this is StubZone))
+                        if (this is SecondaryZone)
                         {
-                            //copy existing SOA record's glue addresses to new SOA record
-                            newEntry.Value[0].SetGlueRecords(_entries[DnsResourceRecordType.SOA][0].GetGlueRecords());
+                            //copy existing SOA record's info to new SOA record
+                            DnsResourceRecord existingSoaRecord = _entries[DnsResourceRecordType.SOA][0];
+                            DnsResourceRecord newSoaRecord = newEntry.Value[0];
+
+                            newSoaRecord.CopyRecordInfoFrom(existingSoaRecord);
                         }
                     }
 
                     _entries[newEntry.Key] = newEntry.Value;
                 }
+            }
+        }
+
+        public void SyncRecords(Dictionary<DnsResourceRecordType, List<DnsResourceRecord>> deletedEntries, Dictionary<DnsResourceRecordType, List<DnsResourceRecord>> addedEntries)
+        {
+            if (deletedEntries is not null)
+            {
+                foreach (KeyValuePair<DnsResourceRecordType, List<DnsResourceRecord>> deletedEntry in deletedEntries)
+                {
+                    if (_entries.TryGetValue(deletedEntry.Key, out IReadOnlyList<DnsResourceRecord> existingRecords))
+                    {
+                        List<DnsResourceRecord> updatedRecords = new List<DnsResourceRecord>(Math.Max(0, existingRecords.Count - deletedEntry.Value.Count));
+
+                        foreach (DnsResourceRecord existingRecord in existingRecords)
+                        {
+                            bool deleted = false;
+
+                            foreach (DnsResourceRecord deletedRecord in deletedEntry.Value)
+                            {
+                                if (existingRecord.RDATA.Equals(deletedRecord.RDATA))
+                                {
+                                    deleted = true;
+                                    break;
+                                }
+                            }
+
+                            if (!deleted)
+                                updatedRecords.Add(existingRecord);
+                        }
+
+                        if (existingRecords.Count > updatedRecords.Count)
+                        {
+                            if (updatedRecords.Count > 0)
+                                _entries[deletedEntry.Key] = updatedRecords;
+                            else
+                                _entries.TryRemove(deletedEntry.Key, out _);
+                        }
+                    }
+                }
+            }
+
+            if (addedEntries is not null)
+            {
+                foreach (KeyValuePair<DnsResourceRecordType, List<DnsResourceRecord>> addedEntry in addedEntries)
+                {
+                    _entries.AddOrUpdate(addedEntry.Key, addedEntry.Value, delegate (DnsResourceRecordType key, IReadOnlyList<DnsResourceRecord> existingRecords)
+                    {
+                        List<DnsResourceRecord> updatedRecords = new List<DnsResourceRecord>(existingRecords.Count + addedEntry.Value.Count);
+
+                        updatedRecords.AddRange(existingRecords);
+
+                        foreach (DnsResourceRecord addedRecord in addedEntry.Value)
+                        {
+                            bool exists = false;
+
+                            foreach (DnsResourceRecord existingRecord in existingRecords)
+                            {
+                                if (addedRecord.RDATA.Equals(existingRecord.RDATA))
+                                {
+                                    exists = true;
+                                    break;
+                                }
+                            }
+
+                            if (!exists)
+                                updatedRecords.Add(addedRecord);
+                        }
+
+                        if (updatedRecords.Count > existingRecords.Count)
+                            return updatedRecords;
+                        else
+                            return existingRecords;
+                    });
+                }
+            }
+        }
+
+        public void SyncGlueRecords(IReadOnlyCollection<DnsResourceRecord> deletedGlueRecords, IReadOnlyCollection<DnsResourceRecord> addedGlueRecords)
+        {
+            if (_entries.TryGetValue(DnsResourceRecordType.NS, out IReadOnlyList<DnsResourceRecord> nsRecords))
+            {
+                foreach (DnsResourceRecord nsRecord in nsRecords)
+                    nsRecord.SyncGlueRecords(deletedGlueRecords, addedGlueRecords);
             }
         }
 
@@ -293,33 +764,7 @@ namespace DnsServerCore.Dns.Zones
 
         public virtual void AddRecord(DnsResourceRecord record)
         {
-            switch (record.Type)
-            {
-                case DnsResourceRecordType.CNAME:
-                case DnsResourceRecordType.PTR:
-                case DnsResourceRecordType.SOA:
-                    throw new InvalidOperationException("Cannot add record: use SetRecords() for " + record.Type.ToString() + " record");
-            }
-
-            _entries.AddOrUpdate(record.Type, delegate (DnsResourceRecordType key)
-            {
-                return new DnsResourceRecord[] { record };
-            },
-            delegate (DnsResourceRecordType key, IReadOnlyList<DnsResourceRecord> existingRecords)
-            {
-                foreach (DnsResourceRecord existingRecord in existingRecords)
-                {
-                    if (record.Equals(existingRecord.RDATA))
-                        return existingRecords;
-                }
-
-                List<DnsResourceRecord> updateRecords = new List<DnsResourceRecord>(existingRecords.Count + 1);
-
-                updateRecords.AddRange(existingRecords);
-                updateRecords.Add(record);
-
-                return updateRecords;
-            });
+            AddRecord(record, out _, out _);
         }
 
         public virtual bool DeleteRecords(DnsResourceRecordType type)
@@ -327,78 +772,109 @@ namespace DnsServerCore.Dns.Zones
             return _entries.TryRemove(type, out _);
         }
 
-        public virtual bool DeleteRecord(DnsResourceRecordType type, DnsResourceRecordData record)
+        public virtual bool DeleteRecord(DnsResourceRecordType type, DnsResourceRecordData rdata)
         {
-            if (_entries.TryGetValue(type, out IReadOnlyList<DnsResourceRecord> existingRecords))
-            {
-                if (existingRecords.Count == 1)
-                {
-                    if (record.Equals(existingRecords[0].RDATA))
-                        return _entries.TryRemove(type, out _);
-                }
-                else
-                {
-                    List<DnsResourceRecord> updateRecords = new List<DnsResourceRecord>(existingRecords.Count);
-
-                    for (int i = 0; i < existingRecords.Count; i++)
-                    {
-                        if (!record.Equals(existingRecords[i].RDATA))
-                            updateRecords.Add(existingRecords[i]);
-                    }
-
-                    return _entries.TryUpdate(type, updateRecords, existingRecords);
-                }
-            }
-
-            return false;
+            return TryDeleteRecord(type, rdata, out _);
         }
 
-        public virtual IReadOnlyList<DnsResourceRecord> QueryRecords(DnsResourceRecordType type)
+        public virtual void UpdateRecord(DnsResourceRecord oldRecord, DnsResourceRecord newRecord)
         {
-            //check for CNAME
-            if (_entries.TryGetValue(DnsResourceRecordType.CNAME, out IReadOnlyList<DnsResourceRecord> existingCNAMERecords))
-            {
-                IReadOnlyList<DnsResourceRecord> filteredRecords = FilterDisabledRecords(type, existingCNAMERecords);
-                if (filteredRecords.Count > 0)
-                    return filteredRecords;
-            }
+            if (oldRecord.Type == DnsResourceRecordType.SOA)
+                throw new InvalidOperationException("Cannot update record: use SetRecords() for " + oldRecord.Type.ToString() + " record");
 
-            if (type == DnsResourceRecordType.ANY)
-            {
-                List<DnsResourceRecord> records = new List<DnsResourceRecord>(_entries.Count * 2);
+            if (oldRecord.Type != newRecord.Type)
+                throw new InvalidOperationException("Old and new record types do not match.");
 
-                foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
-                {
-                    switch (entry.Key)
-                    {
-                        case DnsResourceRecordType.FWD:
-                        case DnsResourceRecordType.APP:
-                            //skip records
-                            continue;
+            if (!DeleteRecord(oldRecord.Type, oldRecord.RDATA))
+                throw new DnsWebServiceException("Cannot update record: the old record does not exists.");
 
-                        default:
-                            records.AddRange(entry.Value);
-                            break;
-                    }
-                }
+            AddRecord(newRecord);
+        }
 
-                return FilterDisabledRecords(type, records);
-            }
-
-            if (_entries.TryGetValue(type, out IReadOnlyList<DnsResourceRecord> existingRecords))
-            {
-                IReadOnlyList<DnsResourceRecord> filteredRecords = FilterDisabledRecords(type, existingRecords);
-                if (filteredRecords.Count > 0)
-                    return filteredRecords;
-            }
-
+        public virtual IReadOnlyList<DnsResourceRecord> QueryRecords(DnsResourceRecordType type, bool dnssecOk)
+        {
             switch (type)
             {
-                case DnsResourceRecordType.A:
-                case DnsResourceRecordType.AAAA:
-                    if (_entries.TryGetValue(DnsResourceRecordType.ANAME, out IReadOnlyList<DnsResourceRecord> anameRecords))
-                        return FilterDisabledRecords(type, anameRecords);
+                case DnsResourceRecordType.APP:
+                case DnsResourceRecordType.FWD:
+                case DnsResourceRecordType.NSEC:
+                case DnsResourceRecordType.NSEC3:
+                    {
+                        //return only exact type if exists
+                        if (_entries.TryGetValue(type, out IReadOnlyList<DnsResourceRecord> existingRecords))
+                        {
+                            IReadOnlyList<DnsResourceRecord> filteredRecords = FilterDisabledRecords(type, existingRecords);
+                            if (filteredRecords.Count > 0)
+                            {
+                                if (dnssecOk)
+                                    return AppendRRSigTo(filteredRecords);
 
+                                return filteredRecords;
+                            }
+                        }
+                    }
+                    break;
+
+                case DnsResourceRecordType.ANY:
+                    List<DnsResourceRecord> records = new List<DnsResourceRecord>(_entries.Count * 2);
+
+                    foreach (KeyValuePair<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> entry in _entries)
+                    {
+                        switch (entry.Key)
+                        {
+                            case DnsResourceRecordType.FWD:
+                            case DnsResourceRecordType.APP:
+                                //skip records
+                                continue;
+
+                            default:
+                                records.AddRange(entry.Value);
+                                break;
+                        }
+                    }
+
+                    return FilterDisabledRecords(type, records);
+
+                default:
+                    {
+                        //check for CNAME
+                        if (_entries.TryGetValue(DnsResourceRecordType.CNAME, out IReadOnlyList<DnsResourceRecord> existingCNAMERecords))
+                        {
+                            IReadOnlyList<DnsResourceRecord> filteredRecords = FilterDisabledRecords(type, existingCNAMERecords);
+                            if (filteredRecords.Count > 0)
+                            {
+                                if (dnssecOk)
+                                    return AppendRRSigTo(filteredRecords);
+
+                                return filteredRecords;
+                            }
+                        }
+
+                        //check for exact type
+                        if (_entries.TryGetValue(type, out IReadOnlyList<DnsResourceRecord> existingRecords))
+                        {
+                            IReadOnlyList<DnsResourceRecord> filteredRecords = FilterDisabledRecords(type, existingRecords);
+                            if (filteredRecords.Count > 0)
+                            {
+                                if (dnssecOk)
+                                    return AppendRRSigTo(filteredRecords);
+
+                                return filteredRecords;
+                            }
+                        }
+
+                        //check special processing
+                        switch (type)
+                        {
+                            case DnsResourceRecordType.A:
+                            case DnsResourceRecordType.AAAA:
+                                //check for ANAME
+                                if (_entries.TryGetValue(DnsResourceRecordType.ANAME, out IReadOnlyList<DnsResourceRecord> anameRecords))
+                                    return FilterDisabledRecords(type, anameRecords);
+
+                                break;
+                        }
+                    }
                     break;
             }
 
@@ -411,6 +887,11 @@ namespace DnsServerCore.Dns.Zones
                 return records;
 
             return Array.Empty<DnsResourceRecord>();
+        }
+
+        public IReadOnlyDictionary<DnsResourceRecordType, IReadOnlyList<DnsResourceRecord>> GetAllRecords()
+        {
+            return _entries;
         }
 
         public override bool ContainsNameServerRecords()

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,12 +17,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
-var token = null;
 var refreshTimerHandle;
 var reverseProxyDetected = false;
 
 function showPageLogin() {
     hideAlert();
+
+    localStorage.removeItem("token");
 
     $("#pageMain").hide();
     $("#mnuUser").hide();
@@ -40,26 +41,30 @@ function showPageLogin() {
     }
 }
 
-function showPageMain(username) {
+function showPageMain() {
     hideAlert();
 
     $("#pageLogin").hide();
-
-    $("#mnuUserDisplayName").text(username);
-    $("#txtChangePasswordUsername").val(username);
     $("#mnuUser").show();
 
     $(".nav-tabs li").removeClass("active");
     $(".tab-pane").removeClass("active");
     $("#mainPanelTabListDashboard").addClass("active");
     $("#mainPanelTabPaneDashboard").addClass("active");
+    $("#settingsTabListGeneral").addClass("active");
+    $("#settingsTabPaneGeneral").addClass("active");
     $("#dhcpTabListLeases").addClass("active");
     $("#dhcpTabPaneLeases").addClass("active");
-    $("#divDhcpViewScopes").show();
-    $("#divDhcpEditScope").hide();
+    $("#adminTabListSessions").addClass("active");
+    $("#adminTabPaneSessions").addClass("active");
+    $("#logsTabListLogViewer").addClass("active");
+    $("#logsTabPaneLogViewer").addClass("active");
 
     $("#divViewZones").show();
     $("#divEditZone").hide();
+
+    $("#divDhcpViewScopes").show();
+    $("#divDhcpEditScope").hide();
 
     $("#txtDnsClientNameServer").val("This Server {this-server}");
     $("#txtDnsClientDomain").val("");
@@ -70,14 +75,145 @@ function showPageMain(username) {
     $("#preDnsClientOutput").hide();
 
     $("#divLogViewer").hide();
+    $("#divQueryLogsTable").hide();
+
+    if (sessionData.info.permissions.Dashboard.canView) {
+        $("#mainPanelTabListDashboard").show();
+        refreshDashboard();
+    }
+    else {
+        $("#mainPanelTabListDashboard").hide();
+
+        $("#mainPanelTabListDashboard").removeClass("active");
+        $("#mainPanelTabPaneDashboard").removeClass("active");
+
+        if (sessionData.info.permissions.Zones.canView) {
+            $("#mainPanelTabListZones").addClass("active");
+            $("#mainPanelTabPaneZones").addClass("active");
+            refreshZones(true);
+        }
+        else if (sessionData.info.permissions.Cache.canView) {
+            $("#mainPanelTabListCachedZones").addClass("active");
+            $("#mainPanelTabPaneCachedZones").addClass("active");
+        }
+        else if (sessionData.info.permissions.Allowed.canView) {
+            $("#mainPanelTabListAllowedZones").addClass("active");
+            $("#mainPanelTabPaneAllowedZones").addClass("active");
+        }
+        else if (sessionData.info.permissions.Blocked.canView) {
+            $("#mainPanelTabListBlockedZones").addClass("active");
+            $("#mainPanelTabPaneBlockedZones").addClass("active");
+        }
+        else if (sessionData.info.permissions.Apps.canView) {
+            $("#mainPanelTabListApps").addClass("active");
+            $("#mainPanelTabPaneApps").addClass("active");
+            refreshApps();
+        }
+        else if (sessionData.info.permissions.DnsClient.canView) {
+            $("#mainPanelTabListDnsClient").addClass("active");
+            $("#mainPanelTabPaneDnsClient").addClass("active");
+        }
+        else if (sessionData.info.permissions.Settings.canView) {
+            $("#mainPanelTabListSettings").addClass("active");
+            $("#mainPanelTabPaneSettings").addClass("active");
+            loadDnsSettings()
+        }
+        else if (sessionData.info.permissions.DhcpServer.canView) {
+            $("#mainPanelTabListDhcp").addClass("active");
+            $("#mainPanelTabPaneDhcp").addClass("active");
+            refreshDhcpTab();
+        }
+        else if (sessionData.info.permissions.Administration.canView) {
+            $("#mainPanelTabListAdmin").addClass("active");
+            $("#mainPanelTabPaneAdmin").addClass("active");
+            refreshAdminTab();
+        }
+        else if (sessionData.info.permissions.Logs.canView) {
+            $("#mainPanelTabListLogs").addClass("active");
+            $("#mainPanelTabPaneLogs").addClass("active");
+            refreshLogsTab();
+        }
+        else {
+            $("#mainPanelTabListAbout").addClass("active");
+            $("#mainPanelTabPaneAbout").addClass("active");
+        }
+    }
+
+    if (sessionData.info.permissions.Zones.canView) {
+        $("#mainPanelTabListZones").show();
+    }
+    else {
+        $("#mainPanelTabListZones").hide();
+    }
+
+    if (sessionData.info.permissions.Cache.canView) {
+        $("#mainPanelTabListCachedZones").show();
+        refreshCachedZonesList();
+    }
+    else {
+        $("#mainPanelTabListCachedZones").hide();
+    }
+
+    if (sessionData.info.permissions.Allowed.canView) {
+        $("#mainPanelTabListAllowedZones").show();
+        refreshAllowedZonesList();
+    }
+    else {
+        $("#mainPanelTabListAllowedZones").hide();
+    }
+
+    if (sessionData.info.permissions.Blocked.canView) {
+        $("#mainPanelTabListBlockedZones").show();
+        refreshBlockedZonesList();
+    }
+    else {
+        $("#mainPanelTabListBlockedZones").hide();
+    }
+
+    if (sessionData.info.permissions.Apps.canView) {
+        $("#mainPanelTabListApps").show();
+    }
+    else {
+        $("#mainPanelTabListApps").hide();
+    }
+
+    if (sessionData.info.permissions.DnsClient.canView) {
+        $("#mainPanelTabListDnsClient").show();
+    }
+    else {
+        $("#mainPanelTabListDnsClient").hide();
+    }
+
+    if (sessionData.info.permissions.Settings.canView) {
+        $("#mainPanelTabListSettings").show();
+    }
+    else {
+        $("#mainPanelTabListSettings").hide();
+    }
+
+    if (sessionData.info.permissions.DhcpServer.canView) {
+        $("#mainPanelTabListDhcp").show();
+    }
+    else {
+        $("#mainPanelTabListDhcp").hide();
+    }
+
+    if (sessionData.info.permissions.Administration.canView) {
+        $("#mainPanelTabListAdmin").show();
+    }
+    else {
+        $("#mainPanelTabListAdmin").hide();
+    }
+
+    if (sessionData.info.permissions.Logs.canView) {
+        $("#mainPanelTabListLogs").show();
+    }
+    else {
+        $("#mainPanelTabListLogs").hide();
+    }
 
     $("#pageMain").show();
 
-    loadDnsSettings();
-    refreshDashboard();
-    refreshCachedZonesList();
-    refreshAllowedZonesList();
-    refreshBlockedZonesList();
     checkForUpdate();
 
     refreshTimerHandle = setInterval(function () {
@@ -137,14 +273,32 @@ $(function () {
         }
     });
 
-    $("#chkAllowRecursion").click(function () {
-        var allowRecursion = $("#chkAllowRecursion").prop('checked');
-        $("#chkAllowRecursionOnlyForPrivateNetworks").prop('disabled', !allowRecursion);
+    $("input[type=radio][name=rdRecursion]").change(function () {
+        var recursion = $('input[name=rdRecursion]:checked').val();
+        if (recursion === "UseSpecifiedNetworks") {
+            $("#txtRecursionDeniedNetworks").prop("disabled", false);
+            $("#txtRecursionAllowedNetworks").prop("disabled", false);
+        }
+        else {
+            $("#txtRecursionDeniedNetworks").prop("disabled", true);
+            $("#txtRecursionAllowedNetworks").prop("disabled", true);
+        }
+    });
+
+    $("input[type=radio][name=rdBlockingType]").change(function () {
+        var recursion = $('input[name=rdBlockingType]:checked').val();
+        if (recursion === "CustomAddress") {
+            $("#txtCustomBlockingAddresses").prop("disabled", false);
+        }
+        else {
+            $("#txtCustomBlockingAddresses").prop("disabled", true);
+        }
     });
 
     $("#chkWebServiceEnableTls").click(function () {
         var webServiceEnableTls = $("#chkWebServiceEnableTls").prop("checked");
         $("#chkWebServiceHttpToTlsRedirect").prop("disabled", !webServiceEnableTls);
+        $("#chkWebServiceUseSelfSignedTlsCertificate").prop("disabled", !webServiceEnableTls);
         $("#txtWebServiceTlsPort").prop("disabled", !webServiceEnableTls);
         $("#txtWebServiceTlsCertificatePath").prop("disabled", !webServiceEnableTls);
         $("#txtWebServiceTlsCertificatePassword").prop("disabled", !webServiceEnableTls);
@@ -420,10 +574,20 @@ $(function () {
                 $("#rdForwarderProtocolTcp").prop("checked", true);
                 break;
 
+            case "opendns-https":
+                $("#txtForwarders").val("https://doh.opendns.com/dns-query");
+                $("#rdForwarderProtocolHttps").prop("checked", true);
+                break;
+
 
             case "opendns-fs-udp":
                 $("#txtForwarders").val("208.67.222.123\r\n208.67.220.123");
                 $("#rdForwarderProtocolUdp").prop("checked", true);
+                break;
+
+            case "opendns-fs-https":
+                $("#txtForwarders").val("https://doh.familyshield.opendns.com/dns-query");
+                $("#rdForwarderProtocolHttps").prop("checked", true);
                 break;
 
 
@@ -469,172 +633,74 @@ $(function () {
     });
 
     $("#lblDoHHost").text(window.location.hostname + ":8053");
-
-    showPageLogin();
-    login("admin", "admin");
 });
 
-function login(username, password) {
-
-    var autoLogin = false;
-
-    if (username == null) {
-        username = $("#txtUser").val();
-        password = $("#txtPass").val();
-    }
-    else {
-        autoLogin = true;
-    }
-
-    if ((username === null) || (username === "")) {
-        showAlert("warning", "Missing!", "Please enter an username.");
-        $("#txtUser").focus();
-        return false;
-    }
-
-    if ((password === null) || (password === "")) {
-        showAlert("warning", "Missing!", "Please enter a password.");
-        $("#txtPass").focus();
-        return false;
-    }
-
-    var btn = $("#btnLogin").button('loading');
-
-    HTTPRequest({
-        url: "/api/login?user=" + encodeURIComponent(username) + "&pass=" + encodeURIComponent(password),
-        success: function (responseJSON) {
-            token = responseJSON.token;
-
-            showPageMain(username);
-
-            if ((username === "admin") && (password === "admin")) {
-                $('#modalChangePassword').modal();
-
-                setTimeout(function () {
-                    $("#txtChangePasswordNewPassword").focus();
-                }, 1000);
-            }
-        },
-        error: function () {
-            btn.button('reset');
-            $("#txtUser").focus();
-
-            if (autoLogin)
-                hideAlert();
-        }
-    });
-
-    return false;
-}
-
-function logout() {
-
-    HTTPRequest({
-        url: "/api/logout?token=" + token,
-        success: function (responseJSON) {
-            token = null;
-            showPageLogin();
-        },
-        error: function () {
-            token = null;
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function resetChangePasswordModal() {
-
-    $("#divChangePasswordAlert").html("");
-    $("#txtChangePasswordNewPassword").val("");
-    $("#txtChangePasswordConfirmPassword").val("");
-
-    setTimeout(function () {
-        $("#txtChangePasswordNewPassword").focus();
-    }, 1000);
-
-    return false;
-}
-
-function changePassword() {
-
-    var divChangePasswordAlert = $("#divChangePasswordAlert");
-    var newPassword = $("#txtChangePasswordNewPassword").val();
-    var confirmPassword = $("#txtChangePasswordConfirmPassword").val();
-
-    if ((newPassword === null) || (newPassword === "")) {
-        showAlert("warning", "Missing!", "Please enter new password.", divChangePasswordAlert);
-        $("#txtChangePasswordNewPassword").focus();
-        return false;
-    }
-
-    if ((confirmPassword === null) || (confirmPassword === "")) {
-        showAlert("warning", "Missing!", "Please enter confirm password.", divChangePasswordAlert);
-        $("#txtChangePasswordConfirmPassword").focus();
-        return false;
-    }
-
-    if (newPassword !== confirmPassword) {
-        showAlert("warning", "Mismatch!", "Passwords do not match. Please try again.", divChangePasswordAlert);
-        $("#txtChangePasswordNewPassword").focus();
-        return false;
-    }
-
-    var btn = $("#btnChangePasswordSave").button('loading');
-
-    HTTPRequest({
-        url: "/api/changePassword?token=" + token + "&pass=" + encodeURIComponent(newPassword),
-        success: function (responseJSON) {
-            $("#modalChangePassword").modal("hide");
-            btn.button('reset');
-
-            showAlert("success", "Password Changed!", "Password was changed successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        },
-        objAlertPlaceholder: divChangePasswordAlert
-    });
-
-    return false;
-}
-
 function checkForUpdate() {
-
     HTTPRequest({
-        url: "/api/checkForUpdate?token=" + token,
+        url: "/api/user/checkForUpdate?token=" + sessionData.token,
         success: function (responseJSON) {
-
-            var lnkNewVersionAvailable = $("#lnkNewVersionAvailable");
+            var lnkUpdateAvailable = $("#lnkUpdateAvailable");
 
             if (responseJSON.response.updateAvailable) {
+                $("#lblUpdateVersion").text(responseJSON.response.updateVersion);
+                $("#lblCurrentVersion").text(responseJSON.response.currentVersion);
 
-                if (responseJSON.response.displayText == null)
-                    responseJSON.response.displayText = "New Version Available!";
+                if (responseJSON.response.updateTitle == null)
+                    responseJSON.response.updateTitle = "New Update Available!";
 
-                lnkNewVersionAvailable.text(responseJSON.response.displayText);
-                lnkNewVersionAvailable.attr("href", responseJSON.response.downloadLink);
-                lnkNewVersionAvailable.show();
+                lnkUpdateAvailable.text(responseJSON.response.updateTitle);
+                $("#lblUpdateAvailableTitle").text(responseJSON.response.updateTitle);
+
+                var lblUpdateMessage = $("#lblUpdateMessage");
+                var lnkUpdateDownload = $("#lnkUpdateDownload");
+                var lnkUpdateInstructions = $("#lnkUpdateInstructions");
+                var lnkUpdateChangeLog = $("#lnkUpdateChangeLog");
+
+                if (responseJSON.response.updateMessage == null) {
+                    lblUpdateMessage.hide();
+                }
+                else {
+                    lblUpdateMessage.text(responseJSON.response.updateMessage);
+                    lblUpdateMessage.show();
+                }
+
+                if (responseJSON.response.downloadLink == null) {
+                    lnkUpdateDownload.hide();
+                }
+                else {
+                    lnkUpdateDownload.attr("href", responseJSON.response.downloadLink);
+                    lnkUpdateDownload.show();
+                }
+
+                if (responseJSON.response.instructionsLink == null) {
+                    lnkUpdateInstructions.hide();
+                }
+                else {
+                    lnkUpdateInstructions.attr("href", responseJSON.response.instructionsLink);
+                    lnkUpdateInstructions.show();
+                }
+
+                if (responseJSON.response.changeLogLink == null) {
+                    lnkUpdateChangeLog.hide();
+                }
+                else {
+                    lnkUpdateChangeLog.attr("href", responseJSON.response.changeLogLink);
+                    lnkUpdateChangeLog.show();
+                }
+
+                lnkUpdateAvailable.show();
             }
             else {
-                lnkNewVersionAvailable.hide();
+                lnkUpdateAvailable.hide();
             }
         },
         invalidToken: function () {
             showPageLogin();
         }
     });
-
-    return false;
 }
 
 function loadDnsSettings() {
-
     var divDnsSettingsLoader = $("#divDnsSettingsLoader");
     var divDnsSettings = $("#divDnsSettings");
 
@@ -642,7 +708,7 @@ function loadDnsSettings() {
     divDnsSettingsLoader.show();
 
     HTTPRequest({
-        url: "/api/getDnsSettings?token=" + token,
+        url: "/api/settings/get?token=" + sessionData.token,
         success: function (responseJSON) {
             document.title = responseJSON.response.dnsServerDomain + " - " + "Technitium DNS Server v" + responseJSON.response.version;
             $("#lblAboutVersion").text(responseJSON.response.version);
@@ -681,11 +747,13 @@ function loadDnsSettings() {
 
             $("#chkWebServiceEnableTls").prop("checked", responseJSON.response.webServiceEnableTls);
             $("#chkWebServiceHttpToTlsRedirect").prop("disabled", !responseJSON.response.webServiceEnableTls);
+            $("#chkWebServiceUseSelfSignedTlsCertificate").prop("disabled", !responseJSON.response.webServiceEnableTls);
             $("#txtWebServiceTlsPort").prop("disabled", !responseJSON.response.webServiceEnableTls);
             $("#txtWebServiceTlsCertificatePath").prop("disabled", !responseJSON.response.webServiceEnableTls);
             $("#txtWebServiceTlsCertificatePassword").prop("disabled", !responseJSON.response.webServiceEnableTls);
 
             $("#chkWebServiceHttpToTlsRedirect").prop("checked", responseJSON.response.webServiceHttpToTlsRedirect);
+            $("#chkWebServiceUseSelfSignedTlsCertificate").prop("checked", responseJSON.response.webServiceUseSelfSignedTlsCertificate);
             $("#txtWebServiceTlsPort").val(responseJSON.response.webServiceTlsPort);
             $("#txtWebServiceTlsCertificatePath").val(responseJSON.response.webServiceTlsCertificatePath);
 
@@ -708,7 +776,33 @@ function loadDnsSettings() {
             else
                 $("#txtDnsTlsCertificatePassword").val(responseJSON.response.dnsTlsCertificatePassword);
 
+            $("#tableTsigKeys").html("");
+
+            if (responseJSON.response.tsigKeys != null) {
+                for (var i = 0; i < responseJSON.response.tsigKeys.length; i++) {
+                    addTsigKeyRow(responseJSON.response.tsigKeys[i].keyName, responseJSON.response.tsigKeys[i].sharedSecret, responseJSON.response.tsigKeys[i].algorithmName);
+                }
+            }
+
+            $("#txtDefaultRecordTtl").val(responseJSON.response.defaultRecordTtl);
+            $("#txtAddEditRecordTtl").attr("placeholder", responseJSON.response.defaultRecordTtl);
+            $("#chkDnsAppsEnableAutomaticUpdate").prop("checked", responseJSON.response.dnsAppsEnableAutomaticUpdate);
+
             $("#chkPreferIPv6").prop("checked", responseJSON.response.preferIPv6);
+            $("#txtEdnsUdpPayloadSize").val(responseJSON.response.udpPayloadSize);
+            $("#chkDnssecValidation").prop("checked", responseJSON.response.dnssecValidation);
+
+            $("#txtResolverRetries").val(responseJSON.response.resolverRetries);
+            $("#txtResolverTimeout").val(responseJSON.response.resolverTimeout);
+            $("#txtResolverMaxStackCount").val(responseJSON.response.resolverMaxStackCount);
+
+            $("#txtForwarderRetries").val(responseJSON.response.forwarderRetries);
+            $("#txtForwarderTimeout").val(responseJSON.response.forwarderTimeout);
+            $("#txtForwarderConcurrency").val(responseJSON.response.forwarderConcurrency);
+
+            $("#txtClientTimeout").val(responseJSON.response.clientTimeout);
+            $("#txtTcpSendTimeout").val(responseJSON.response.tcpSendTimeout);
+            $("#txtTcpReceiveTimeout").val(responseJSON.response.tcpReceiveTimeout);
 
             $("#chkEnableLogging").prop("checked", responseJSON.response.enableLogging);
             $("#chkLogQueries").prop("disabled", !responseJSON.response.enableLogging);
@@ -720,15 +814,67 @@ function loadDnsSettings() {
             $("#txtMaxLogFileDays").val(responseJSON.response.maxLogFileDays);
             $("#txtMaxStatFileDays").val(responseJSON.response.maxStatFileDays);
 
-            $("#chkAllowRecursion").prop("checked", responseJSON.response.allowRecursion);
-            $("#chkAllowRecursionOnlyForPrivateNetworks").prop('disabled', !responseJSON.response.allowRecursion);
-            $("#chkAllowRecursionOnlyForPrivateNetworks").prop("checked", responseJSON.response.allowRecursionOnlyForPrivateNetworks);
+            $("#txtRecursionDeniedNetworks").prop("disabled", true);
+            $("#txtRecursionAllowedNetworks").prop("disabled", true);
+
+            switch (responseJSON.response.recursion) {
+                case "Allow":
+                    $("#rdRecursionAllow").prop("checked", true);
+                    break;
+
+                case "AllowOnlyForPrivateNetworks":
+                    $("#rdRecursionAllowOnlyForPrivateNetworks").prop("checked", true);
+                    break;
+
+                case "UseSpecifiedNetworks":
+                    $("#rdRecursionUseSpecifiedNetworks").prop("checked", true);
+                    $("#txtRecursionDeniedNetworks").prop("disabled", false);
+                    $("#txtRecursionAllowedNetworks").prop("disabled", false);
+                    break;
+
+                case "Deny":
+                default:
+                    $("#rdRecursionDeny").prop("checked", true);
+                    break;
+            }
+
+            {
+                var value = "";
+
+                for (var i = 0; i < responseJSON.response.recursionDeniedNetworks.length; i++)
+                    value += responseJSON.response.recursionDeniedNetworks[i] + "\r\n";
+
+                $("#txtRecursionDeniedNetworks").val(value);
+            }
+
+            {
+                var value = "";
+
+                for (var i = 0; i < responseJSON.response.recursionAllowedNetworks.length; i++)
+                    value += responseJSON.response.recursionAllowedNetworks[i] + "\r\n";
+
+                $("#txtRecursionAllowedNetworks").val(value);
+            }
+
             $("#chkRandomizeName").prop("checked", responseJSON.response.randomizeName);
             $("#chkQnameMinimization").prop("checked", responseJSON.response.qnameMinimization);
+            $("#chkNsRevalidation").prop("checked", responseJSON.response.nsRevalidation);
+
+            $("#txtQpmLimitRequests").val(responseJSON.response.qpmLimitRequests);
+            $("#txtQpmLimitErrors").val(responseJSON.response.qpmLimitErrors);
+            $("#txtQpmLimitSampleMinutes").val(responseJSON.response.qpmLimitSampleMinutes);
+            $("#txtQpmLimitIPv4PrefixLength").val(responseJSON.response.qpmLimitIPv4PrefixLength);
+            $("#txtQpmLimitIPv6PrefixLength").val(responseJSON.response.qpmLimitIPv6PrefixLength);
 
             $("#chkServeStale").prop("checked", responseJSON.response.serveStale);
             $("#txtServeStaleTtl").prop("disabled", !responseJSON.response.serveStale);
             $("#txtServeStaleTtl").val(responseJSON.response.serveStaleTtl);
+
+            $("#txtCacheMaximumEntries").val(responseJSON.response.cacheMaximumEntries);
+            $("#txtCacheMinimumRecordTtl").val(responseJSON.response.cacheMinimumRecordTtl);
+            $("#txtCacheMaximumRecordTtl").val(responseJSON.response.cacheMaximumRecordTtl);
+            $("#txtCacheNegativeRecordTtl").val(responseJSON.response.cacheNegativeRecordTtl);
+            $("#txtCacheFailureRecordTtl").val(responseJSON.response.cacheFailureRecordTtl);
 
             $("#txtCachePrefetchEligibility").val(responseJSON.response.cachePrefetchEligibility);
             $("#txtCachePrefetchTrigger").val(responseJSON.response.cachePrefetchTrigger);
@@ -824,11 +970,47 @@ function loadDnsSettings() {
                     break;
             }
 
-            $("#chkUseNxDomainForBlocking").prop("checked", responseJSON.response.useNxDomainForBlocking);
+            $("#chkEnableBlocking").prop("checked", responseJSON.response.enableBlocking);
+            $("#chkAllowTxtBlockingReport").prop("checked", responseJSON.response.allowTxtBlockingReport);
+
+            if (responseJSON.response.temporaryDisableBlockingTill == null)
+                $("#lblTemporaryDisableBlockingTill").text("Not Set");
+            else
+                $("#lblTemporaryDisableBlockingTill").text(moment(responseJSON.response.temporaryDisableBlockingTill).local().format("YYYY-MM-DD HH:mm:ss"));
+
+            $("#txtTemporaryDisableBlockingMinutes").val("");
+
+            $("#txtCustomBlockingAddresses").prop("disabled", true);
+
+            switch (responseJSON.response.blockingType) {
+                case "NxDomain":
+                    $("#rdBlockingTypeNxDomain").prop("checked", true);
+                    break;
+
+                case "CustomAddress":
+                    $("#rdBlockingTypeCustomAddress").prop("checked", true);
+                    $("#txtCustomBlockingAddresses").prop("disabled", false);
+                    break;
+
+                case "AnyAddress":
+                default:
+                    $("#rdBlockingTypeAnyAddress").prop("checked", true);
+                    break;
+            }
+
+            {
+                var value = "";
+
+                for (var i = 0; i < responseJSON.response.customBlockingAddresses.length; i++)
+                    value += responseJSON.response.customBlockingAddresses[i] + "\r\n";
+
+                $("#txtCustomBlockingAddresses").val(value);
+            }
 
             var blockListUrls = responseJSON.response.blockListUrls;
             if (blockListUrls == null) {
                 $("#txtBlockListUrls").val("");
+                $("#btnUpdateBlockListsNow").prop("disabled", true);
             }
             else {
                 var value = "";
@@ -837,6 +1019,7 @@ function loadDnsSettings() {
                     value += blockListUrls[i] + "\r\n";
 
                 $("#txtBlockListUrls").val(value);
+                $("#btnUpdateBlockListsNow").prop("disabled", false);
             }
 
             $("#optQuickBlockList").val("blank");
@@ -850,7 +1033,18 @@ function loadDnsSettings() {
             }
 
             $("#txtBlockListUpdateIntervalHours").val(responseJSON.response.blockListUpdateIntervalHours);
-            $("#lblBlockListNextUpdatedOn").text(responseJSON.response.blockListNextUpdatedOn);
+
+            if (responseJSON.response.blockListNextUpdatedOn == null) {
+                $("#lblBlockListNextUpdatedOn").text("Not Scheduled");
+            }
+            else {
+                var blockListNextUpdatedOn = moment(responseJSON.response.blockListNextUpdatedOn);
+
+                if (moment().utc().isBefore(blockListNextUpdatedOn))
+                    $("#lblBlockListNextUpdatedOn").text(blockListNextUpdatedOn.local().format("YYYY-MM-DD HH:mm:ss"));
+                else
+                    $("#lblBlockListNextUpdatedOn").text("Updating Now");
+            }
 
             divDnsSettingsLoader.hide();
             divDnsSettings.show();
@@ -860,18 +1054,15 @@ function loadDnsSettings() {
         },
         objLoaderPlaceholder: divDnsSettingsLoader
     });
-
-    return false;
 }
 
 function saveDnsSettings() {
-
     var dnsServerDomain = $("#txtDnsServerDomain").val();
 
     if ((dnsServerDomain === null) || (dnsServerDomain === "")) {
         showAlert("warning", "Missing!", "Please enter server domain name.");
         $("#txtDnsServerDomain").focus();
-        return false;
+        return;
     }
 
     var dnsServerLocalEndPoints = cleanTextList($("#txtDnsServerLocalEndPoints").val());
@@ -895,6 +1086,7 @@ function saveDnsSettings() {
 
     var webServiceEnableTls = $("#chkWebServiceEnableTls").prop("checked");
     var webServiceHttpToTlsRedirect = $("#chkWebServiceHttpToTlsRedirect").prop("checked");
+    var webServiceUseSelfSignedTlsCertificate = $("#chkWebServiceUseSelfSignedTlsCertificate").prop("checked");
     var webServiceTlsPort = $("#txtWebServiceTlsPort").val();
     var webServiceTlsCertificatePath = $("#txtWebServiceTlsCertificatePath").val();
     var webServiceTlsCertificatePassword = $("#txtWebServiceTlsCertificatePassword").val();
@@ -905,7 +1097,81 @@ function saveDnsSettings() {
     var dnsTlsCertificatePath = $("#txtDnsTlsCertificatePath").val();
     var dnsTlsCertificatePassword = $("#txtDnsTlsCertificatePassword").val();
 
+    var tsigKeys = serializeTableData($("#tableTsigKeys"), 3);
+    if (tsigKeys === false)
+        return;
+
+    if (tsigKeys.length === 0)
+        tsigKeys = false;
+
+    var defaultRecordTtl = $("#txtDefaultRecordTtl").val();
+    var dnsAppsEnableAutomaticUpdate = $("#chkDnsAppsEnableAutomaticUpdate").prop('checked');
     var preferIPv6 = $("#chkPreferIPv6").prop('checked');
+    var udpPayloadSize = $("#txtEdnsUdpPayloadSize").val();
+    var dnssecValidation = $("#chkDnssecValidation").prop('checked');
+
+    var resolverRetries = $("#txtResolverRetries").val();
+    if ((resolverRetries == null) || (resolverRetries === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for Resolver Retries.");
+        $("#txtResolverRetries").focus();
+        return;
+    }
+
+    var resolverTimeout = $("#txtResolverTimeout").val();
+    if ((resolverTimeout == null) || (resolverTimeout === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for Resolver Timeout.");
+        $("#txtResolverTimeout").focus();
+        return;
+    }
+
+    var resolverMaxStackCount = $("#txtResolverMaxStackCount").val();
+    if ((resolverMaxStackCount == null) || (resolverMaxStackCount === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for Resolver Max Stack Count.");
+        $("#txtResolverMaxStackCount").focus();
+        return;
+    }
+
+    var forwarderRetries = $("#txtForwarderRetries").val();
+    if ((forwarderRetries == null) || (forwarderRetries === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for Forwarder Retries.");
+        $("#txtForwarderRetries").focus();
+        return;
+    }
+
+    var forwarderTimeout = $("#txtForwarderTimeout").val();
+    if ((forwarderTimeout == null) || (forwarderTimeout === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for Forwarder Timeout.");
+        $("#txtForwarderTimeout").focus();
+        return;
+    }
+
+    var forwarderConcurrency = $("#txtForwarderConcurrency").val();
+    if ((forwarderConcurrency == null) || (forwarderConcurrency === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for Forwarder Concurrency.");
+        $("#txtForwarderConcurrency").focus();
+        return;
+    }
+
+    var clientTimeout = $("#txtClientTimeout").val();
+    if ((clientTimeout == null) || (clientTimeout === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for Client Timeout.");
+        $("#txtClientTimeout").focus();
+        return;
+    }
+
+    var tcpSendTimeout = $("#txtTcpSendTimeout").val();
+    if ((tcpSendTimeout == null) || (tcpSendTimeout === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for TCP Send Timeout.");
+        $("#txtTcpSendTimeout").focus();
+        return;
+    }
+
+    var tcpReceiveTimeout = $("#txtTcpReceiveTimeout").val();
+    if ((tcpReceiveTimeout == null) || (tcpReceiveTimeout === "")) {
+        showAlert("warning", "Missing!", "Please enter a value for TCP Receive Timeout.");
+        $("#txtTcpReceiveTimeout").focus();
+        return;
+    }
 
     var enableLogging = $("#chkEnableLogging").prop('checked');
     var logQueries = $("#chkLogQueries").prop('checked');
@@ -914,40 +1180,125 @@ function saveDnsSettings() {
     var maxLogFileDays = $("#txtMaxLogFileDays").val();
     var maxStatFileDays = $("#txtMaxStatFileDays").val();
 
-    var allowRecursion = $("#chkAllowRecursion").prop('checked');
-    var allowRecursionOnlyForPrivateNetworks = $("#chkAllowRecursionOnlyForPrivateNetworks").prop('checked');
+    var recursion = $("input[name=rdRecursion]:checked").val();
+
+    var recursionDeniedNetworks = cleanTextList($("#txtRecursionDeniedNetworks").val());
+
+    if ((recursionDeniedNetworks.length === 0) || (recursionDeniedNetworks === ","))
+        recursionDeniedNetworks = false;
+    else
+        $("#txtRecursionDeniedNetworks").val(recursionDeniedNetworks.replace(/,/g, "\n"));
+
+    var recursionAllowedNetworks = cleanTextList($("#txtRecursionAllowedNetworks").val());
+
+    if ((recursionAllowedNetworks.length === 0) || (recursionAllowedNetworks === ","))
+        recursionAllowedNetworks = false;
+    else
+        $("#txtRecursionAllowedNetworks").val(recursionAllowedNetworks.replace(/,/g, "\n"));
+
     var randomizeName = $("#chkRandomizeName").prop('checked');
     var qnameMinimization = $("#chkQnameMinimization").prop('checked');
+    var nsRevalidation = $("#chkNsRevalidation").prop('checked');
+
+    var qpmLimitRequests = $("#txtQpmLimitRequests").val();
+    if ((qpmLimitRequests == null) || (qpmLimitRequests === "")) {
+        showAlert("warning", "Missing!", "Please enter Queries Per Minute (QPM) request limit value.");
+        $("#txtQpmLimitRequests").focus();
+        return;
+    }
+
+    var qpmLimitErrors = $("#txtQpmLimitErrors").val();
+    if ((qpmLimitErrors == null) || (qpmLimitErrors === "")) {
+        showAlert("warning", "Missing!", "Please enter Queries Per Minute (QPM) error limit value.");
+        $("#txtQpmLimitErrors").focus();
+        return;
+    }
+
+    var qpmLimitSampleMinutes = $("#txtQpmLimitSampleMinutes").val();
+    if ((qpmLimitSampleMinutes == null) || (qpmLimitSampleMinutes === "")) {
+        showAlert("warning", "Missing!", "Please enter Queries Per Minute (QPM) sample value.");
+        $("#txtQpmLimitSampleMinutes").focus();
+        return;
+    }
+
+    var qpmLimitIPv4PrefixLength = $("#txtQpmLimitIPv4PrefixLength").val();
+    if ((qpmLimitIPv4PrefixLength == null) || (qpmLimitIPv4PrefixLength === "")) {
+        showAlert("warning", "Missing!", "Please enter Queries Per Minute (QPM) limit IPv4 prefix length.");
+        $("#txtQpmLimitIPv4PrefixLength").focus();
+        return;
+    }
+
+    var qpmLimitIPv6PrefixLength = $("#txtQpmLimitIPv6PrefixLength").val();
+    if ((qpmLimitIPv6PrefixLength == null) || (qpmLimitIPv6PrefixLength === "")) {
+        showAlert("warning", "Missing!", "Please enter Queries Per Minute (QPM) limit IPv6 prefix length.");
+        $("#txtQpmLimitIPv6PrefixLength").focus();
+        return;
+    }
 
     var serveStale = $("#chkServeStale").prop("checked");
     var serveStaleTtl = $("#txtServeStaleTtl").val();
+
+    var cacheMaximumEntries = $("#txtCacheMaximumEntries").val();
+    if ((cacheMaximumEntries === null) || (cacheMaximumEntries === "")) {
+        showAlert("warning", "Missing!", "Please enter cache maximum entries value.");
+        $("#txtCacheMaximumEntries").focus();
+        return;
+    }
+
+    var cacheMinimumRecordTtl = $("#txtCacheMinimumRecordTtl").val();
+    if ((cacheMinimumRecordTtl === null) || (cacheMinimumRecordTtl === "")) {
+        showAlert("warning", "Missing!", "Please enter cache minimum record TTL value.");
+        $("#txtCacheMinimumRecordTtl").focus();
+        return;
+    }
+
+    var cacheMaximumRecordTtl = $("#txtCacheMaximumRecordTtl").val();
+    if ((cacheMaximumRecordTtl === null) || (cacheMaximumRecordTtl === "")) {
+        showAlert("warning", "Missing!", "Please enter cache maximum record TTL value.");
+        $("#txtCacheMaximumRecordTtl").focus();
+        return;
+    }
+
+    var cacheNegativeRecordTtl = $("#txtCacheNegativeRecordTtl").val();
+    if ((cacheNegativeRecordTtl === null) || (cacheNegativeRecordTtl === "")) {
+        showAlert("warning", "Missing!", "Please enter cache negative record TTL value.");
+        $("#txtCacheNegativeRecordTtl").focus();
+        return;
+    }
+
+    var cacheFailureRecordTtl = $("#txtCacheFailureRecordTtl").val();
+    if ((cacheFailureRecordTtl === null) || (cacheFailureRecordTtl === "")) {
+        showAlert("warning", "Missing!", "Please enter cache failure record TTL value.");
+        $("#txtCacheFailureRecordTtl").focus();
+        return;
+    }
 
     var cachePrefetchEligibility = $("#txtCachePrefetchEligibility").val();
     if ((cachePrefetchEligibility === null) || (cachePrefetchEligibility === "")) {
         showAlert("warning", "Missing!", "Please enter cache prefetch eligibility value.");
         $("#txtCachePrefetchEligibility").focus();
-        return false;
+        return;
     }
 
     var cachePrefetchTrigger = $("#txtCachePrefetchTrigger").val();
     if ((cachePrefetchTrigger === null) || (cachePrefetchTrigger === "")) {
         showAlert("warning", "Missing!", "Please enter cache prefetch trigger value.");
         $("#txtCachePrefetchTrigger").focus();
-        return false;
+        return;
     }
 
     var cachePrefetchSampleIntervalInMinutes = $("#txtCachePrefetchSampleIntervalInMinutes").val();
     if ((cachePrefetchSampleIntervalInMinutes === null) || (cachePrefetchSampleIntervalInMinutes === "")) {
         showAlert("warning", "Missing!", "Please enter cache auto prefetch sample interval value.");
         $("#txtCachePrefetchSampleIntervalInMinutes").focus();
-        return false;
+        return;
     }
 
     var cachePrefetchSampleEligibilityHitsPerHour = $("#txtCachePrefetchSampleEligibilityHitsPerHour").val();
     if ((cachePrefetchSampleEligibilityHitsPerHour === null) || (cachePrefetchSampleEligibilityHitsPerHour === "")) {
         showAlert("warning", "Missing!", "Please enter cache auto prefetch sample eligibility value.");
         $("#txtCachePrefetchSampleEligibilityHitsPerHour").focus();
-        return false;
+        return;
     }
 
     var proxy;
@@ -961,7 +1312,7 @@ function saveDnsSettings() {
         if ((proxyAddress === null) || (proxyAddress === "")) {
             showAlert("warning", "Missing!", "Please enter proxy server address.");
             $("#txtProxyAddress").focus();
-            return false;
+            return;
         }
 
         var proxyPort = $("#txtProxyPort").val();
@@ -969,7 +1320,7 @@ function saveDnsSettings() {
         if ((proxyPort === null) || (proxyPort === "")) {
             showAlert("warning", "Missing!", "Please enter proxy server port.");
             $("#txtProxyPort").focus();
-            return false;
+            return;
         }
 
         var proxyBypass = cleanTextList($("#txtProxyBypassList").val());
@@ -991,7 +1342,16 @@ function saveDnsSettings() {
 
     var forwarderProtocol = $('input[name=rdForwarderProtocol]:checked').val();
 
-    var useNxDomainForBlocking = $("#chkUseNxDomainForBlocking").prop("checked");
+    var enableBlocking = $("#chkEnableBlocking").prop("checked");
+    var allowTxtBlockingReport = $("#chkAllowTxtBlockingReport").prop("checked");
+
+    var blockingType = $("input[name=rdBlockingType]:checked").val();
+
+    var customBlockingAddresses = cleanTextList($("#txtCustomBlockingAddresses").val());
+    if ((customBlockingAddresses.length === 0) || customBlockingAddresses === ",")
+        customBlockingAddresses = false;
+    else
+        $("#txtCustomBlockingAddresses").val(customBlockingAddresses.replace(/,/g, "\n") + "\n");
 
     var blockListUrls = cleanTextList($("#txtBlockListUrls").val());
 
@@ -1005,17 +1365,42 @@ function saveDnsSettings() {
     var btn = $("#btnSaveDnsSettings").button('loading');
 
     HTTPRequest({
-        url: "/api/setDnsSettings?token=" + token + "&dnsServerDomain=" + dnsServerDomain + "&dnsServerLocalEndPoints=" + encodeURIComponent(dnsServerLocalEndPoints)
-            + "&webServiceLocalAddresses=" + encodeURIComponent(webServiceLocalAddresses) + "&webServiceHttpPort=" + webServiceHttpPort + "&webServiceEnableTls=" + webServiceEnableTls + "&webServiceHttpToTlsRedirect=" + webServiceHttpToTlsRedirect + "&webServiceTlsPort=" + webServiceTlsPort + "&webServiceTlsCertificatePath=" + encodeURIComponent(webServiceTlsCertificatePath) + "&webServiceTlsCertificatePassword=" + encodeURIComponent(webServiceTlsCertificatePassword)
+        url: "/api/settings/set?token=" + sessionData.token + "&dnsServerDomain=" + dnsServerDomain + "&dnsServerLocalEndPoints=" + encodeURIComponent(dnsServerLocalEndPoints)
+            + "&webServiceLocalAddresses=" + encodeURIComponent(webServiceLocalAddresses) + "&webServiceHttpPort=" + webServiceHttpPort + "&webServiceEnableTls=" + webServiceEnableTls + "&webServiceHttpToTlsRedirect=" + webServiceHttpToTlsRedirect + "&webServiceUseSelfSignedTlsCertificate=" + webServiceUseSelfSignedTlsCertificate + "&webServiceTlsPort=" + webServiceTlsPort + "&webServiceTlsCertificatePath=" + encodeURIComponent(webServiceTlsCertificatePath) + "&webServiceTlsCertificatePassword=" + encodeURIComponent(webServiceTlsCertificatePassword)
             + "&enableDnsOverHttp=" + enableDnsOverHttp + "&enableDnsOverTls=" + enableDnsOverTls + "&enableDnsOverHttps=" + enableDnsOverHttps + "&dnsTlsCertificatePath=" + encodeURIComponent(dnsTlsCertificatePath) + "&dnsTlsCertificatePassword=" + encodeURIComponent(dnsTlsCertificatePassword)
-            + "&preferIPv6=" + preferIPv6 + "&enableLogging=" + enableLogging + "&logQueries=" + logQueries + "&useLocalTime=" + useLocalTime + "&logFolder=" + encodeURIComponent(logFolder) + "&maxLogFileDays=" + maxLogFileDays + "&maxStatFileDays=" + maxStatFileDays
-            + "&allowRecursion=" + allowRecursion + "&allowRecursionOnlyForPrivateNetworks=" + allowRecursionOnlyForPrivateNetworks + "&randomizeName=" + randomizeName + "&qnameMinimization=" + qnameMinimization
-            + "&serveStale=" + serveStale + "&serveStaleTtl=" + serveStaleTtl + "&cachePrefetchEligibility=" + cachePrefetchEligibility + "&cachePrefetchTrigger=" + cachePrefetchTrigger + "&cachePrefetchSampleIntervalInMinutes=" + cachePrefetchSampleIntervalInMinutes + "&cachePrefetchSampleEligibilityHitsPerHour=" + cachePrefetchSampleEligibilityHitsPerHour
-            + proxy + "&forwarders=" + encodeURIComponent(forwarders) + "&forwarderProtocol=" + forwarderProtocol + "&useNxDomainForBlocking=" + useNxDomainForBlocking + "&blockListUrls=" + encodeURIComponent(blockListUrls) + "&blockListUpdateIntervalHours=" + blockListUpdateIntervalHours,
+            + "&tsigKeys=" + encodeURIComponent(tsigKeys)
+            + "&defaultRecordTtl=" + defaultRecordTtl + "&dnsAppsEnableAutomaticUpdate=" + dnsAppsEnableAutomaticUpdate + "&preferIPv6=" + preferIPv6 + "&udpPayloadSize=" + udpPayloadSize + "&dnssecValidation=" + dnssecValidation
+            + "&resolverRetries=" + resolverRetries + "&resolverTimeout=" + resolverTimeout + "&resolverMaxStackCount=" + resolverMaxStackCount
+            + "&forwarderRetries=" + forwarderRetries + "&forwarderTimeout=" + forwarderTimeout + "&forwarderConcurrency=" + forwarderConcurrency
+            + "&clientTimeout=" + clientTimeout + "&tcpSendTimeout=" + tcpSendTimeout + "&tcpReceiveTimeout=" + tcpReceiveTimeout
+            + "&enableLogging=" + enableLogging + "&logQueries=" + logQueries + "&useLocalTime=" + useLocalTime + "&logFolder=" + encodeURIComponent(logFolder) + "&maxLogFileDays=" + maxLogFileDays + "&maxStatFileDays=" + maxStatFileDays
+            + "&recursion=" + recursion + "&recursionDeniedNetworks=" + encodeURIComponent(recursionDeniedNetworks) + "&recursionAllowedNetworks=" + encodeURIComponent(recursionAllowedNetworks) + "&randomizeName=" + randomizeName + "&qnameMinimization=" + qnameMinimization + "&nsRevalidation=" + nsRevalidation
+            + "&qpmLimitRequests=" + qpmLimitRequests + "&qpmLimitErrors=" + qpmLimitErrors + "&qpmLimitSampleMinutes=" + qpmLimitSampleMinutes + "&qpmLimitIPv4PrefixLength=" + qpmLimitIPv4PrefixLength + "&qpmLimitIPv6PrefixLength=" + qpmLimitIPv6PrefixLength
+            + "&serveStale=" + serveStale + "&serveStaleTtl=" + serveStaleTtl + "&cacheMaximumEntries=" + cacheMaximumEntries + "&cacheMinimumRecordTtl=" + cacheMinimumRecordTtl + "&cacheMaximumRecordTtl=" + cacheMaximumRecordTtl + "&cacheNegativeRecordTtl=" + cacheNegativeRecordTtl + "&cacheFailureRecordTtl=" + cacheFailureRecordTtl + "&cachePrefetchEligibility=" + cachePrefetchEligibility + "&cachePrefetchTrigger=" + cachePrefetchTrigger + "&cachePrefetchSampleIntervalInMinutes=" + cachePrefetchSampleIntervalInMinutes + "&cachePrefetchSampleEligibilityHitsPerHour=" + cachePrefetchSampleEligibilityHitsPerHour
+            + proxy + "&forwarders=" + encodeURIComponent(forwarders) + "&forwarderProtocol=" + forwarderProtocol + "&enableBlocking=" + enableBlocking + "&allowTxtBlockingReport=" + allowTxtBlockingReport + "&blockingType=" + blockingType + "&customBlockingAddresses=" + encodeURIComponent(customBlockingAddresses) + "&blockListUrls=" + encodeURIComponent(blockListUrls) + "&blockListUpdateIntervalHours=" + blockListUpdateIntervalHours,
         success: function (responseJSON) {
             document.title = responseJSON.response.dnsServerDomain + " - " + "Technitium DNS Server v" + responseJSON.response.version;
             $("#lblDnsServerDomain").text(" - " + responseJSON.response.dnsServerDomain);
             $("#txtDnsServerDomain").val(responseJSON.response.dnsServerDomain);
+
+            $("#txtAddEditRecordTtl").attr("placeholder", responseJSON.response.defaultRecordTtl);
+
+            //reset tls state
+            $("#chkWebServiceEnableTls").prop("checked", responseJSON.response.webServiceEnableTls);
+            $("#chkWebServiceHttpToTlsRedirect").prop("disabled", !responseJSON.response.webServiceEnableTls);
+            $("#chkWebServiceUseSelfSignedTlsCertificate").prop("disabled", !responseJSON.response.webServiceEnableTls);
+            $("#txtWebServiceTlsPort").prop("disabled", !responseJSON.response.webServiceEnableTls);
+            $("#txtWebServiceTlsCertificatePath").prop("disabled", !responseJSON.response.webServiceEnableTls);
+            $("#txtWebServiceTlsCertificatePassword").prop("disabled", !responseJSON.response.webServiceEnableTls);
+
+            //reload tsig keys
+            $("#tableTsigKeys").html("");
+
+            if (responseJSON.response.tsigKeys != null) {
+                for (var i = 0; i < responseJSON.response.tsigKeys.length; i++) {
+                    addTsigKeyRow(responseJSON.response.tsigKeys[i].keyName, responseJSON.response.tsigKeys[i].sharedSecret, responseJSON.response.tsigKeys[i].algorithmName);
+                }
+            }
 
             //fix custom block list url in case port changes
             {
@@ -1023,6 +1408,37 @@ function saveDnsSettings() {
 
                 optCustomLocalBlockList.attr("value", "http://localhost:" + responseJSON.response.webServiceHttpPort + "/blocklist.txt");
                 optCustomLocalBlockList.text("Custom Local Block List (http://localhost:" + responseJSON.response.webServiceHttpPort + "/blocklist.txt)");
+            }
+
+            if (enableBlocking)
+                $("#lblTemporaryDisableBlockingTill").text("Not Set");
+
+            if (responseJSON.response.blockListNextUpdatedOn == null) {
+                $("#lblBlockListNextUpdatedOn").text("Not Scheduled");
+            }
+            else {
+                var blockListNextUpdatedOn = moment(responseJSON.response.blockListNextUpdatedOn);
+
+                if (moment().utc().isBefore(blockListNextUpdatedOn))
+                    $("#lblBlockListNextUpdatedOn").text(blockListNextUpdatedOn.local().format("YYYY-MM-DD HH:mm:ss"));
+                else
+                    $("#lblBlockListNextUpdatedOn").text("Updating Now");
+            }
+
+            $("#btnUpdateBlockListsNow").prop("disabled", (responseJSON.response.blockListUrls == null));
+
+            //reload forwarders
+            var forwarders = responseJSON.response.forwarders;
+            if (forwarders == null) {
+                $("#txtForwarders").val("");
+            }
+            else {
+                var value = "";
+
+                for (var i = 0; i < forwarders.length; i++)
+                    value += forwarders[i] + "\r\n";
+
+                $("#txtForwarders").val(value);
             }
 
             btn.button('reset');
@@ -1038,18 +1454,39 @@ function saveDnsSettings() {
             showPageLogin();
         }
     });
+}
 
-    return false;
+function addTsigKeyRow(keyName, sharedSecret, algorithmName) {
+
+    var id = Math.floor(Math.random() * 10000);
+
+    var tableHtmlRows = "<tr id=\"tableTsigKeyRow" + id + "\"><td><input type=\"text\" class=\"form-control\" value=\"" + htmlEncode(keyName) + "\"></td>";
+    tableHtmlRows += "<td><input type=\"text\" class=\"form-control\" data-optional=\"true\" value=\"" + htmlEncode(sharedSecret) + "\"></td>";
+
+    tableHtmlRows += "<td><select class=\"form-control\">";
+    tableHtmlRows += "<option value=\"hmac-md5.sig-alg.reg.int\"" + (algorithmName == "hmac-md5.sig-alg.reg.int" ? " selected" : "") + ">HMAC-MD5 (obsolete)</option>";
+    tableHtmlRows += "<option value=\"hmac-sha1\"" + (algorithmName == "hmac-sha1" ? " selected" : "") + ">HMAC-SHA1</option>";
+    tableHtmlRows += "<option value=\"hmac-sha256\"" + (algorithmName == "hmac-sha256" ? " selected" : "") + ">HMAC-SHA256 (recommended)</option>";
+    tableHtmlRows += "<option value=\"hmac-sha256-128\"" + (algorithmName == "hmac-sha256-128" ? " selected" : "") + ">HMAC-SHA256 (128 bits)</option>";
+    tableHtmlRows += "<option value=\"hmac-sha384\"" + (algorithmName == "hmac-sha384" ? " selected" : "") + ">HMAC-SHA384</option>";
+    tableHtmlRows += "<option value=\"hmac-sha384-192\"" + (algorithmName == "hmac-sha384-192" ? " selected" : "") + ">HMAC-SHA384 (192 bits)</option>";
+    tableHtmlRows += "<option value=\"hmac-sha512\"" + (algorithmName == "hmac-sha512" ? " selected" : "") + ">HMAC-SHA512</option>";
+    tableHtmlRows += "<option value=\"hmac-sha512-256\"" + (algorithmName == "hmac-sha512-256" ? " selected" : "") + ">HMAC-SHA512 (256 bits)</option>";
+    tableHtmlRows += "</select></td>";
+
+    tableHtmlRows += "<td><button type=\"button\" class=\"btn btn-danger\" onclick=\"$('#tableTsigKeyRow" + id + "').remove();\">Delete</button></td></tr>";
+
+    $("#tableTsigKeys").append(tableHtmlRows);
 }
 
 function checkForReverseProxy(responseJSON) {
-    if (location.protocol == "https:") {
+    if (window.location.protocol == "https:") {
         var currentPort = window.location.port;
 
         if ((currentPort == 0) || (currentPort == ""))
             currentPort = 443;
 
-        reverseProxyDetected = currentPort != responseJSON.response.webServiceTlsPort;
+        reverseProxyDetected = !responseJSON.response.webServiceEnableTls || (currentPort != responseJSON.response.webServiceTlsPort);
     } else {
         var currentPort = window.location.port;
 
@@ -1065,6 +1502,11 @@ function checkForWebConsoleRedirection(responseJSON) {
         return;
 
     if (location.protocol == "https:") {
+        if (!responseJSON.response.webServiceEnableTls) {
+            window.open("http://" + window.location.hostname + ":" + responseJSON.response.webServiceHttpPort, "_self");
+            return;
+        }
+
         var currentPort = window.location.port;
 
         if ((currentPort == 0) || (currentPort == ""))
@@ -1072,7 +1514,13 @@ function checkForWebConsoleRedirection(responseJSON) {
 
         if (currentPort != responseJSON.response.webServiceTlsPort)
             window.open("https://" + window.location.hostname + ":" + responseJSON.response.webServiceTlsPort, "_self");
-    } else {
+    }
+    else {
+        if (responseJSON.response.webServiceEnableTls && responseJSON.response.webServiceHttpToTlsRedirect) {
+            window.open("https://" + window.location.hostname + ":" + responseJSON.response.webServiceTlsPort, "_self");
+            return;
+        }
+
         var currentPort = window.location.port;
 
         if ((currentPort == 0) || (currentPort == ""))
@@ -1085,14 +1533,17 @@ function checkForWebConsoleRedirection(responseJSON) {
 
 function forceUpdateBlockLists() {
     if (!confirm("Are you sure to force download and update the block lists?"))
-        return false;
+        return;
 
     var btn = $("#btnUpdateBlockListsNow").button('loading');
 
     HTTPRequest({
-        url: "/api/forceUpdateBlockLists?token=" + token,
+        url: "/api/settings/forceUpdateBlockLists?token=" + sessionData.token,
         success: function (responseJSON) {
             btn.button('reset');
+
+            $("#lblBlockListNextUpdatedOn").text("Updating Now");
+
             showAlert("success", "Updating Block List!", "Block list update was triggered successfully.");
         },
         error: function () {
@@ -1103,24 +1554,40 @@ function forceUpdateBlockLists() {
             showPageLogin();
         }
     });
-
-    return false;
 }
 
-function cleanTextList(text) {
-    text = text.replace(/\n/g, ",");
+function temporaryDisableBlockingNow() {
+    var minutes = $("#txtTemporaryDisableBlockingMinutes").val();
 
-    while (text.indexOf(",,") !== -1) {
-        text = text.replace(/,,/g, ",");
+    if ((minutes === null) || (minutes === "")) {
+        showAlert("warning", "Missing!", "Please enter a value in minutes to temporarily disable blocking.");
+        $("#txtTemporaryDisableBlockingMinutes").focus();
+        return;
     }
 
-    if (text.startsWith(","))
-        text = text.substr(1);
+    if (!confirm("Are you sure to temporarily disable blocking for " + minutes + " minute(s)?"))
+        return;
 
-    if (text.endsWith(","))
-        text = text.substr(0, text.length - 1);
+    var btn = $("#btnTemporaryDisableBlockingNow").button('loading');
 
-    return text;
+    HTTPRequest({
+        url: "/api/settings/temporaryDisableBlocking?token=" + sessionData.token + "&minutes=" + minutes,
+        success: function (responseJSON) {
+            btn.button('reset');
+
+            $("#chkEnableBlocking").prop("checked", false);
+            $("#lblTemporaryDisableBlockingTill").text(moment(responseJSON.response.temporaryDisableBlockingTill).local().format("YYYY-MM-DD HH:mm:ss"));
+
+            showAlert("success", "Blocking Disabled!", "Blocking was successfully disabled temporarily for " + htmlEncode(minutes) + " minute(s).");
+        },
+        error: function () {
+            btn.button('reset');
+        },
+        invalidToken: function () {
+            btn.button('reset');
+            showPageLogin();
+        }
+    });
 }
 
 function updateChart(chart, data) {
@@ -1203,7 +1670,6 @@ var chartLegendOnClick = function (e, legendItem) {
 }
 
 function refreshDashboard(hideLoader) {
-
     if (!$("#mainPanelTabPaneDashboard").hasClass("active"))
         return;
 
@@ -1221,14 +1687,14 @@ function refreshDashboard(hideLoader) {
         if (start === null || (start === "")) {
             showAlert("warning", "Missing!", "Please select a start date.");
             $("#dpCustomDayWiseStart").focus();
-            return false;
+            return;
         }
 
         var end = $("#dpCustomDayWiseEnd").val();
         if (end === null || (end === "")) {
             showAlert("warning", "Missing!", "Please select an end date.");
             $("#dpCustomDayWiseEnd").focus();
-            return false;
+            return;
         }
 
         custom = "&start=" + start + "&end=" + end;
@@ -1240,7 +1706,7 @@ function refreshDashboard(hideLoader) {
     }
 
     HTTPRequest({
-        url: "/api/getStats?token=" + token + "&type=" + type + custom,
+        url: "/api/dashboard/stats/get?token=" + sessionData.token + "&type=" + type +"&utc=true" + custom,
         success: function (responseJSON) {
 
             //stats
@@ -1258,6 +1724,7 @@ function refreshDashboard(hideLoader) {
             $("#divDashboardStatsTotalClients").text(responseJSON.response.stats.totalClients.toLocaleString());
 
             $("#divDashboardStatsZones").text(responseJSON.response.stats.zones.toLocaleString());
+            $("#divDashboardStatsCachedEntries").text(responseJSON.response.stats.cachedEntries.toLocaleString());
             $("#divDashboardStatsAllowedZones").text(responseJSON.response.stats.allowedZones.toLocaleString());
             $("#divDashboardStatsBlockedZones").text(responseJSON.response.stats.blockedZones.toLocaleString());
             $("#divDashboardStatsBlockListZones").text(responseJSON.response.stats.blockListZones.toLocaleString());
@@ -1286,6 +1753,12 @@ function refreshDashboard(hideLoader) {
             }
 
             //main chart
+
+            //fix labels
+            for (var i = 0; i < responseJSON.response.mainChartData.labels.length; i++) {
+                responseJSON.response.mainChartData.labels[i] = moment(responseJSON.response.mainChartData.labels[i]).local().format(responseJSON.response.mainChartData.labelFormat);
+            }
+
             if (window.chartDashboardMain == null) {
                 var contextDashboardMain = document.getElementById("canvasDashboardMain").getContext('2d');
 
@@ -1369,7 +1842,7 @@ function refreshDashboard(hideLoader) {
                     tableHtmlRows = "";
 
                     for (var i = 0; i < topClients.length; i++) {
-                        tableHtmlRows += "<tr><td>" + htmlEncode(topClients[i].name) + "<br />" + htmlEncode(topClients[i].domain) + "</td><td>" + topClients[i].hits.toLocaleString() + "</td></tr>";
+                        tableHtmlRows += "<tr><td style=\"word-wrap: anywhere;\">" + htmlEncode(topClients[i].name) + "<br />" + htmlEncode(topClients[i].domain == "" ? "." : topClients[i].domain) + "</td><td>" + topClients[i].hits.toLocaleString() + "</td></tr>";
                     }
                 }
 
@@ -1382,13 +1855,16 @@ function refreshDashboard(hideLoader) {
                 var topDomains = responseJSON.response.topDomains;
 
                 if (topDomains.length < 1) {
-                    tableHtmlRows = "<tr><td colspan=\"2\" align=\"center\">No Data</td></tr>";
+                    tableHtmlRows = "<tr><td colspan=\"3\" align=\"center\">No Data</td></tr>";
                 }
                 else {
                     tableHtmlRows = "";
 
                     for (var i = 0; i < topDomains.length; i++) {
-                        tableHtmlRows += "<tr><td>" + topDomains[i].name + "</td><td>" + topDomains[i].hits.toLocaleString() + "</td></tr>";
+                        tableHtmlRows += "<tr><td style=\"word-wrap: anywhere;\">" + htmlEncode(topDomains[i].name == "" ? "." : topDomains[i].name) + "</td><td>" + topDomains[i].hits.toLocaleString();
+                        tableHtmlRows += "</td><td align=\"right\"><div class=\"dropdown\"><a href=\"#\" id=\"btnDashboardTopDomainsRowOption" + i + "\" class=\"dropdown-toggle\" data-toggle=\"dropdown\" aria-haspopup=\"true\" aria-expanded=\"true\"><span class=\"glyphicon glyphicon-option-vertical\" aria-hidden=\"true\"></span></a><ul class=\"dropdown-menu dropdown-menu-right\">";
+                        tableHtmlRows += "<li><a href=\"#\" data-id=\"" + i + "\" data-domain=\"" + htmlEncode(topDomains[i].name) + "\" onclick=\"blockDomain(this, 'btnDashboardTopDomainsRowOption'); return false;\">Block Domain</a></li>";
+                        tableHtmlRows += "</ul></div></td></tr>";
                     }
                 }
 
@@ -1401,13 +1877,16 @@ function refreshDashboard(hideLoader) {
                 var topBlockedDomains = responseJSON.response.topBlockedDomains;
 
                 if (topBlockedDomains.length < 1) {
-                    tableHtmlRows = "<tr><td colspan=\"2\" align=\"center\">No Data</td></tr>";
+                    tableHtmlRows = "<tr><td colspan=\"3\" align=\"center\">No Data</td></tr>";
                 }
                 else {
                     tableHtmlRows = "";
 
                     for (var i = 0; i < topBlockedDomains.length; i++) {
-                        tableHtmlRows += "<tr><td>" + topBlockedDomains[i].name + "</td><td>" + topBlockedDomains[i].hits.toLocaleString() + "</td></tr>";
+                        tableHtmlRows += "<tr><td style=\"word-wrap: anywhere;\">" + htmlEncode(topBlockedDomains[i].name == "" ? "." : topBlockedDomains[i].name) + "</td><td>" + topBlockedDomains[i].hits.toLocaleString();
+                        tableHtmlRows += "</td><td align=\"right\"><div class=\"dropdown\"><a href=\"#\" id=\"btnDashboardTopBlockedDomainsRowOption" + i + "\" class=\"dropdown-toggle\" data-toggle=\"dropdown\" aria-haspopup=\"true\" aria-expanded=\"true\"><span class=\"glyphicon glyphicon-option-vertical\" aria-hidden=\"true\"></span></a><ul class=\"dropdown-menu dropdown-menu-right\">";
+                        tableHtmlRows += "<li><a href=\"#\" data-id=\"" + i + "\" data-domain=\"" + htmlEncode(topBlockedDomains[i].name) + "\" onclick=\"allowDomain(this, 'btnDashboardTopBlockedDomainsRowOption'); return false;\">Allow Domain</a></li>";
+                        tableHtmlRows += "</ul></div></td></tr>";
                     }
                 }
 
@@ -1425,8 +1904,6 @@ function refreshDashboard(hideLoader) {
         objLoaderPlaceholder: divDashboardLoader,
         dontHideAlert: hideLoader
     });
-
-    return false;
 }
 
 function showTopStats(statsType, limit) {
@@ -1462,21 +1939,21 @@ function showTopStats(statsType, limit) {
         if (start === null || (start === "")) {
             showAlert("warning", "Missing!", "Please select a start date.");
             $("#dpCustomDayWiseStart").focus();
-            return false;
+            return;
         }
 
         var end = $("#dpCustomDayWiseEnd").val();
         if (end === null || (end === "")) {
             showAlert("warning", "Missing!", "Please select an end date.");
             $("#dpCustomDayWiseEnd").focus();
-            return false;
+            return;
         }
 
         custom = "&start=" + start + "&end=" + end;
     }
 
     HTTPRequest({
-        url: "/api/getTopStats?token=" + token + "&type=" + type + custom + "&statsType=" + statsType + "&limit=" + limit,
+        url: "/api/dashboard/stats/getTop?token=" + sessionData.token + "&type=" + type + custom + "&statsType=" + statsType + "&limit=" + limit,
         success: function (responseJSON) {
             divTopStatsLoader.hide();
 
@@ -1491,11 +1968,17 @@ function showTopStats(statsType, limit) {
                     tableHtmlRows = "";
 
                     for (var i = 0; i < topClients.length; i++) {
-                        tableHtmlRows += "<tr><td>" + htmlEncode(topClients[i].name) + "<br />" + htmlEncode(topClients[i].domain) + "</td><td>" + topClients[i].hits.toLocaleString() + "</td></tr>";
+                        tableHtmlRows += "<tr><td style=\"word-wrap: anywhere;\">" + htmlEncode(topClients[i].name) + "<br />" + htmlEncode(topClients[i].domain == "" ? "." : topClients[i].domain) + "</td><td>" + topClients[i].hits.toLocaleString() + "</td></tr>";
                     }
                 }
 
                 $("#tbodyTopStatsClients").html(tableHtmlRows);
+
+                if (topClients.length > 0)
+                    $("#tfootTopStatsClients").html("Total Clients: " + topClients.length);
+                else
+                    $("#tfootTopStatsClients").html("");
+
                 $("#tableTopStatsClients").show();
             }
             else if (responseJSON.response.topDomains != null) {
@@ -1503,17 +1986,26 @@ function showTopStats(statsType, limit) {
                 var topDomains = responseJSON.response.topDomains;
 
                 if (topDomains.length < 1) {
-                    tableHtmlRows = "<tr><td colspan=\"2\" align=\"center\">No Data</td></tr>";
+                    tableHtmlRows = "<tr><td colspan=\"3\" align=\"center\">No Data</td></tr>";
                 }
                 else {
                     tableHtmlRows = "";
 
                     for (var i = 0; i < topDomains.length; i++) {
-                        tableHtmlRows += "<tr><td>" + topDomains[i].name + "</td><td>" + topDomains[i].hits.toLocaleString() + "</td></tr>";
+                        tableHtmlRows += "<tr><td style=\"word-wrap: anywhere;\">" + htmlEncode(topDomains[i].name == "" ? "." : topDomains[i].name) + "</td><td>" + topDomains[i].hits.toLocaleString();
+                        tableHtmlRows += "</td><td align=\"right\"><div class=\"dropdown\"><a href=\"#\" id=\"btnDashboardTopStatsDomainsRowOption" + i + "\" class=\"dropdown-toggle\" data-toggle=\"dropdown\" aria-haspopup=\"true\" aria-expanded=\"true\"><span class=\"glyphicon glyphicon-option-vertical\" aria-hidden=\"true\"></span></a><ul class=\"dropdown-menu dropdown-menu-right\">";
+                        tableHtmlRows += "<li><a href=\"#\" data-id=\"" + i + "\" data-domain=\"" + htmlEncode(topDomains[i].name) + "\" onclick=\"blockDomain(this, 'btnDashboardTopStatsDomainsRowOption', 'divTopStatsAlert'); return false;\">Block Domain</a></li>";
+                        tableHtmlRows += "</ul></div></td></tr>";
                     }
                 }
 
                 $("#tbodyTopStatsDomains").html(tableHtmlRows);
+
+                if (topDomains.length > 0)
+                    $("#tfootTopStatsDomains").html("Total Domains: " + topDomains.length);
+                else
+                    $("#tfootTopStatsDomains").html("");
+
                 $("#tableTopStatsDomains").show();
             }
             else if (responseJSON.response.topBlockedDomains != null) {
@@ -1521,17 +2013,26 @@ function showTopStats(statsType, limit) {
                 var topBlockedDomains = responseJSON.response.topBlockedDomains;
 
                 if (topBlockedDomains.length < 1) {
-                    tableHtmlRows = "<tr><td colspan=\"2\" align=\"center\">No Data</td></tr>";
+                    tableHtmlRows = "<tr><td colspan=\"3\" align=\"center\">No Data</td></tr>";
                 }
                 else {
                     tableHtmlRows = "";
 
                     for (var i = 0; i < topBlockedDomains.length; i++) {
-                        tableHtmlRows += "<tr><td>" + topBlockedDomains[i].name + "</td><td>" + topBlockedDomains[i].hits.toLocaleString() + "</td></tr>";
+                        tableHtmlRows += "<tr><td style=\"word-wrap: anywhere;\">" + htmlEncode(topBlockedDomains[i].name == "" ? "." : topBlockedDomains[i].name) + "</td><td>" + topBlockedDomains[i].hits.toLocaleString();
+                        tableHtmlRows += "</td><td align=\"right\"><div class=\"dropdown\"><a href=\"#\" id=\"btnDashboardTopStatsBlockedDomainsRowOption" + i + "\" class=\"dropdown-toggle\" data-toggle=\"dropdown\" aria-haspopup=\"true\" aria-expanded=\"true\"><span class=\"glyphicon glyphicon-option-vertical\" aria-hidden=\"true\"></span></a><ul class=\"dropdown-menu dropdown-menu-right\">";
+                        tableHtmlRows += "<li><a href=\"#\" data-id=\"" + i + "\" data-domain=\"" + htmlEncode(topBlockedDomains[i].name) + "\" onclick=\"allowDomain(this, 'btnDashboardTopStatsBlockedDomainsRowOption', 'divTopStatsAlert'); return false;\">Allow Domain</a></li>";
+                        tableHtmlRows += "</ul></div></td></tr>";
                     }
                 }
 
                 $("#tbodyTopStatsBlockedDomains").html(tableHtmlRows);
+
+                if (topBlockedDomains.length > 0)
+                    $("#tfootTopStatsBlockedDomains").html("Total Domains: " + topBlockedDomains.length);
+                else
+                    $("#tfootTopStatsBlockedDomains").html("");
+
                 $("#tableTopStatsBlockedDomains").show();
             }
 
@@ -1543,398 +2044,9 @@ function showTopStats(statsType, limit) {
         objLoaderPlaceholder: divTopStatsLoader,
         objAlertPlaceholder: divTopStatsAlert
     });
-
-    return false;
-}
-
-function flushDnsCache() {
-
-    if (!confirm("Are you sure to flush the DNS Server cache?"))
-        return false;
-
-    var btn = $("#btnFlushDnsCache").button('loading');
-
-    HTTPRequest({
-        url: "/api/flushDnsCache?token=" + token,
-        success: function (responseJSON) {
-            btn.button('reset');
-            showAlert("success", "Cache Flushed!", "DNS Server cache was flushed successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function deleteCachedZone() {
-
-    var domain = $("#txtCachedZoneViewerTitle").text();
-
-    if (!confirm("Are you sure you want to delete the cached zone '" + domain + "' and all its records?"))
-        return false;
-
-    var btn = $("#btnDeleteCachedZone").button('loading');
-
-    HTTPRequest({
-        url: "/api/deleteCachedZone?token=" + token + "&domain=" + domain,
-        success: function (responseJSON) {
-            refreshCachedZonesList(getParentDomain(domain), "up");
-
-            btn.button('reset');
-            showAlert("success", "Cached Zone Deleted!", "Cached zone was deleted successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function getParentDomain(domain) {
-
-    if ((domain != null) && (domain != "")) {
-        var parentDomain;
-        var i = domain.indexOf(".");
-
-        if (i == -1)
-            parentDomain = "";
-        else
-            parentDomain = domain.substr(i + 1);
-
-        return parentDomain;
-    }
-
-    return null;
-}
-
-function refreshCachedZonesList(domain, direction) {
-
-    if (domain == null)
-        domain = "";
-
-    domain.toLowerCase();
-
-    var lstCachedZones = $("#lstCachedZones");
-    var divCachedZoneViewer = $("#divCachedZoneViewer");
-    var preCachedZoneViewerBody = $("#preCachedZoneViewerBody");
-
-    divCachedZoneViewer.hide();
-    preCachedZoneViewerBody.hide();
-
-    HTTPRequest({
-        url: "/api/listCachedZones?token=" + token + "&domain=" + domain + ((direction == null) ? "" : "&direction=" + direction),
-        success: function (responseJSON) {
-            var newDomain = responseJSON.response.domain;
-            var zones = responseJSON.response.zones;
-
-            var list = "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshCachedZonesList('" + newDomain + "');\"><b>[refresh]</b></a></div>"
-
-            var parentDomain = getParentDomain(newDomain);
-
-            if (parentDomain != null)
-                list += "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshCachedZonesList('" + parentDomain + "', 'up');\"><b>[up]</b></a></div>"
-
-            for (var i = 0; i < zones.length; i++) {
-                var zoneName = htmlEncode(zones[i]);
-
-                list += "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshCachedZonesList('" + zoneName + "');\">" + zoneName + "</a></div>"
-            }
-
-            lstCachedZones.html(list);
-
-            if (newDomain == "") {
-                $("#txtCachedZoneViewerTitle").text("<ROOT>");
-                $("#btnDeleteCachedZone").hide();
-            }
-            else {
-                $("#txtCachedZoneViewerTitle").text(newDomain);
-                $("#btnDeleteCachedZone").show();
-            }
-
-            if (responseJSON.response.records.length > 0) {
-                preCachedZoneViewerBody.text(JSON.stringify(responseJSON.response.records, null, 2));
-                preCachedZoneViewerBody.show();
-            }
-
-            divCachedZoneViewer.show();
-        },
-        invalidToken: function () {
-            showPageLogin();
-        },
-        error: function () {
-            lstCachedZones.html("<div class=\"zone\"><a href=\"#\" onclick=\"return refreshCachedZonesList('" + domain + "');\"><b>[refresh]</b></a></div>");
-        },
-        objLoaderPlaceholder: lstCachedZones
-    });
-
-    return false;
-}
-
-function allowZone() {
-
-    var domain = $("#txtAllowZone").val();
-
-    if ((domain === null) || (domain === "")) {
-        showAlert("warning", "Missing!", "Please enter a domain name to allow.");
-        $("#txtAllowZone").focus();
-        return false;
-    }
-
-    var btn = $("#btnAllowZone").button('loading');
-
-    HTTPRequest({
-        url: "/api/allowZone?token=" + token + "&domain=" + domain,
-        success: function (responseJSON) {
-            refreshAllowedZonesList(domain);
-
-            $("#txtAllowZone").val("");
-            btn.button('reset');
-
-            showAlert("success", "Zone Allowed!", "Zone was allowed successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function deleteAllowedZone() {
-
-    var domain = $("#txtAllowedZoneViewerTitle").text();
-
-    if (!confirm("Are you sure you want to delete the allowed zone '" + domain + "'?"))
-        return false;
-
-    var btn = $("#btnDeleteAllowedZone").button('loading');
-
-    HTTPRequest({
-        url: "/api/deleteAllowedZone?token=" + token + "&domain=" + domain,
-        success: function (responseJSON) {
-            refreshAllowedZonesList(getParentDomain(domain), "up");
-
-            btn.button('reset');
-            showAlert("success", "Allowed Zone Deleted!", "Allowed zone was deleted successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function refreshAllowedZonesList(domain, direction) {
-
-    if (domain == null)
-        domain = "";
-
-    domain.toLowerCase();
-
-    var lstAllowedZones = $("#lstAllowedZones");
-    var divAllowedZoneViewer = $("#divAllowedZoneViewer");
-    var preAllowedZoneViewerBody = $("#preAllowedZoneViewerBody");
-
-    divAllowedZoneViewer.hide();
-    preAllowedZoneViewerBody.hide();
-
-    HTTPRequest({
-        url: "/api/listAllowedZones?token=" + token + "&domain=" + domain + ((direction == null) ? "" : "&direction=" + direction),
-        success: function (responseJSON) {
-            var newDomain = responseJSON.response.domain;
-            var zones = responseJSON.response.zones;
-
-            var list = "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshAllowedZonesList('" + newDomain + "');\"><b>[refresh]</b></a></div>"
-
-            var parentDomain = getParentDomain(newDomain);
-
-            if (parentDomain != null)
-                list += "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshAllowedZonesList('" + parentDomain + "', 'up');\"><b>[up]</b></a></div>"
-
-            for (var i = 0; i < zones.length; i++) {
-                var zoneName = htmlEncode(zones[i]);
-
-                list += "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshAllowedZonesList('" + zoneName + "');\">" + zoneName + "</a></div>"
-            }
-
-            lstAllowedZones.html(list);
-
-            if (newDomain == "") {
-                $("#txtAllowedZoneViewerTitle").text("<ROOT>");
-                $("#btnDeleteAllowedZone").hide();
-            }
-            else {
-                $("#txtAllowedZoneViewerTitle").text(newDomain);
-                $("#btnDeleteAllowedZone").show();
-            }
-
-            if (responseJSON.response.records.length > 0) {
-                preAllowedZoneViewerBody.text(JSON.stringify(responseJSON.response.records, null, 2));
-                preAllowedZoneViewerBody.show();
-            }
-
-            divAllowedZoneViewer.show();
-        },
-        invalidToken: function () {
-            showPageLogin();
-        },
-        error: function () {
-            lstAllowedZones.html("<div class=\"zone\"><a href=\"#\" onclick=\"return refreshAllowedZonesList('" + domain + "');\"><b>[refresh]</b></a></div>");
-        },
-        objLoaderPlaceholder: lstAllowedZones
-    });
-
-    return false;
-}
-
-function blockZone() {
-
-    var domain = $("#txtBlockZone").val();
-
-    if ((domain === null) || (domain === "")) {
-        showAlert("warning", "Missing!", "Please enter a domain name to block.");
-        $("#txtBlockZone").focus();
-        return false;
-    }
-
-    var btn = $("#btnBlockZone").button('loading');
-
-    HTTPRequest({
-        url: "/api/blockZone?token=" + token + "&domain=" + domain,
-        success: function (responseJSON) {
-            refreshBlockedZonesList(domain);
-
-            $("#txtBlockZone").val("");
-            btn.button('reset');
-
-            showAlert("success", "Zone Blocked!", "Domain was added to Blocked Zone successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function deleteBlockedZone() {
-
-    var domain = $("#txtBlockedZoneViewerTitle").text();
-
-    if (!confirm("Are you sure you want to delete the blocked zone '" + domain + "'?"))
-        return false;
-
-    var btn = $("#btnDeleteBlockedZone").button('loading');
-
-    HTTPRequest({
-        url: "/api/deleteBlockedZone?token=" + token + "&domain=" + domain,
-        success: function (responseJSON) {
-            refreshBlockedZonesList(getParentDomain(domain), "up");
-
-            btn.button('reset');
-            showAlert("success", "Blocked Zone Deleted!", "Blocked zone was deleted successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function refreshBlockedZonesList(domain, direction) {
-
-    if (domain == null)
-        domain = "";
-
-    domain.toLowerCase();
-
-    var lstBlockedZones = $("#lstBlockedZones");
-    var divBlockedZoneViewer = $("#divBlockedZoneViewer");
-    var preBlockedZoneViewerBody = $("#preBlockedZoneViewerBody");
-
-    divBlockedZoneViewer.hide();
-    preBlockedZoneViewerBody.hide();
-
-    HTTPRequest({
-        url: "/api/listBlockedZones?token=" + token + "&domain=" + domain + ((direction == null) ? "" : "&direction=" + direction),
-        success: function (responseJSON) {
-            var newDomain = responseJSON.response.domain;
-            var zones = responseJSON.response.zones;
-
-            var list = "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshBlockedZonesList('" + newDomain + "');\"><b>[refresh]</b></a></div>"
-
-            var parentDomain = getParentDomain(newDomain);
-
-            if (parentDomain != null)
-                list += "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshBlockedZonesList('" + parentDomain + "', 'up');\"><b>[up]</b></a></div>"
-
-            for (var i = 0; i < zones.length; i++) {
-                var zoneName = htmlEncode(zones[i]);
-
-                list += "<div class=\"zone\"><a href=\"#\" onclick=\"return refreshBlockedZonesList('" + zoneName + "');\">" + zoneName + "</a></div>"
-            }
-
-            lstBlockedZones.html(list);
-
-            if (newDomain == "") {
-                $("#txtBlockedZoneViewerTitle").text("<ROOT>");
-                $("#btnDeleteBlockedZone").hide();
-            }
-            else {
-                $("#txtBlockedZoneViewerTitle").text(newDomain);
-                $("#btnDeleteBlockedZone").show();
-            }
-
-            if (responseJSON.response.records.length > 0) {
-                preBlockedZoneViewerBody.text(JSON.stringify(responseJSON.response.records, null, 2));
-                preBlockedZoneViewerBody.show();
-            }
-
-            divBlockedZoneViewer.show();
-        },
-        invalidToken: function () {
-            showPageLogin();
-        },
-        error: function () {
-            lstBlockedZones.html("<div class=\"zone\"><a href=\"#\" onclick=\"return refreshBlockedZonesList('" + domain + "');\"><b>[refresh]</b></a></div>");
-        },
-        objLoaderPlaceholder: lstBlockedZones
-    });
-
-    return false;
 }
 
 function resolveQuery(importRecords) {
-
     if (importRecords == null)
         importRecords = false;
 
@@ -1946,6 +2058,7 @@ function resolveQuery(importRecords) {
     var domain = $("#txtDnsClientDomain").val();
     var type = $("#optDnsClientType").val();
     var protocol = $("#optDnsClientProtocol").val();
+    var dnssecValidation = $("#chkDnsClientDnssecValidation").prop("checked");
 
     {
         var i = server.indexOf("{");
@@ -1960,13 +2073,13 @@ function resolveQuery(importRecords) {
     if ((server === null) || (server === "")) {
         showAlert("warning", "Missing!", "Please enter a valid Name Server.");
         $("#txtDnsClientNameServer").focus();
-        return false;
+        return;
     }
 
     if ((domain === null) || (domain === "")) {
         showAlert("warning", "Missing!", "Please enter a domain name to query.");
         $("#txtDnsClientDomain").focus();
-        return false;
+        return;
     }
 
     {
@@ -1987,8 +2100,8 @@ function resolveQuery(importRecords) {
     }
 
     if (importRecords) {
-        if (!confirm("Importing all the records from the result of this query will overwrite existing records in the zone '" + domain + "'.\n\nAre you sure you want to import all records?"))
-            return false;
+        if (!confirm("Importing all the records from the response of this query will add them into an existing primary or conditional forwarder zone. If a matching zone does not exists, a new primary zone for '" + domain + "' will be created.\n\nAre you sure you want to import all records?"))
+            return;
     }
 
     var btn = $(importRecords ? "#btnDnsClientImport" : "#btnDnsClientResolve").button('loading');
@@ -2001,7 +2114,7 @@ function resolveQuery(importRecords) {
     divDnsClientLoader.show();
 
     HTTPRequest({
-        url: "/api/resolveQuery?token=" + token + "&server=" + encodeURIComponent(server) + "&domain=" + encodeURIComponent(domain) + "&type=" + type + "&protocol=" + protocol + (importRecords ? "&import=true" : ""),
+        url: "/api/dnsClient/resolve?token=" + sessionData.token + "&server=" + encodeURIComponent(server) + "&domain=" + encodeURIComponent(domain) + "&type=" + type + "&protocol=" + protocol + "&dnssec=" + dnssecValidation + (importRecords ? "&import=true" : ""),
         success: function (responseJSON) {
             preDnsClientOutput.text(JSON.stringify(responseJSON.response.result, null, 2));
 
@@ -2011,7 +2124,10 @@ function resolveQuery(importRecords) {
             btn.button('reset');
             btnOther.prop("disabled", false);
 
-            if (importRecords) {
+            if (responseJSON.response.warningMessage != null) {
+                showAlert("warning", "Warning!", responseJSON.response.warningMessage);
+            }
+            else if (importRecords) {
                 showAlert("success", "Records Imported!", "Resource records resolved by this DNS client query were successfully imported into this server.");
             }
         },
@@ -2040,267 +2156,13 @@ function resolveQuery(importRecords) {
     });
 
     if (!containsServer)
-        $("#optDnsClientNameServers").prepend('<li><a href="#" onclick="return false;">' + htmlEncode(txtServerName) + '</a></li>');
-
-    return false;
-}
-
-function refreshLogFilesList() {
-
-    var lstLogFiles = $("#lstLogFiles");
-
-    HTTPRequest({
-        url: "/api/listLogs?token=" + token,
-        success: function (responseJSON) {
-            var logFiles = responseJSON.response.logFiles;
-
-            var list = "<div class=\"log\" style=\"font-size: 14px; padding-bottom: 6px;\"><a href=\"#\" onclick=\"return deleteAllStats();\"><b>[delete all stats]</b></a></div>";
-
-            if (logFiles.length == 0) {
-                list += "<div class=\"log\">No Log Was Found</div>";
-            }
-            else {
-                list += "<div class=\"log\" style=\"font-size: 14px; padding-bottom: 6px;\"><a href=\"#\" onclick=\"return deleteAllLogs();\"><b>[delete all logs]</b></a></div>";
-
-                for (var i = 0; i < logFiles.length; i++) {
-                    var logFile = logFiles[i];
-
-                    list += "<div class=\"log\"><a href=\"#\" onclick=\"return viewLog('" + logFile.fileName + "');\">" + logFile.fileName + " [" + logFile.size + "]</a></div>"
-                }
-            }
-
-            lstLogFiles.html(list);
-        },
-        invalidToken: function () {
-            showPageLogin();
-        },
-        objLoaderPlaceholder: lstLogFiles
-    });
-
-    return false;
-}
-
-function viewLog(logFile) {
-
-    var divLogViewer = $("#divLogViewer");
-    var txtLogViewerTitle = $("#txtLogViewerTitle");
-    var divLogViewerLoader = $("#divLogViewerLoader");
-    var preLogViewerBody = $("#preLogViewerBody");
-
-    txtLogViewerTitle.text(logFile);
-
-    preLogViewerBody.hide();
-    divLogViewerLoader.show();
-    divLogViewer.show();
-
-    HTTPGetFileRequest({
-        url: "/log/" + logFile + "?limit=2&token=" + token,
-        success: function (response) {
-
-            divLogViewerLoader.hide();
-
-            preLogViewerBody.text(response);
-            preLogViewerBody.show();
-        },
-        objLoaderPlaceholder: divLogViewerLoader
-    });
-
-    return false;
-}
-
-function downloadLog() {
-
-    var logFile = $("#txtLogViewerTitle").text();
-
-    window.open("/log/" + logFile + "?token=" + token + "&ts=" + (new Date().getTime()), "_blank");
-
-    return false;
-}
-
-function deleteLog() {
-
-    var logFile = $("#txtLogViewerTitle").text();
-
-    if (!confirm("Are you sure you want to permanently delete the log file '" + logFile + "'?"))
-        return false;
-
-    var btn = $("#btnDeleteLog").button('loading');
-
-    HTTPRequest({
-        url: "/api/deleteLog?token=" + token + "&log=" + logFile,
-        success: function (responseJSON) {
-            refreshLogFilesList();
-
-            $("#divLogViewer").hide();
-            btn.button('reset');
-
-            showAlert("success", "Log Deleted!", "Log file was deleted successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function deleteAllLogs() {
-
-    if (!confirm("Are you sure you want to permanently delete all log files?"))
-        return false;
-
-    HTTPRequest({
-        url: "/api/deleteAllLogs?token=" + token,
-        success: function (responseJSON) {
-            refreshLogFilesList();
-
-            $("#divLogViewer").hide();
-
-            showAlert("success", "Logs Deleted!", "All log files were deleted successfully.");
-        },
-        invalidToken: function () {
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function deleteAllStats() {
-
-    if (!confirm("Are you sure you want to permanently delete all stats files?"))
-        return false;
-
-    HTTPRequest({
-        url: "/api/deleteAllStats?token=" + token,
-        success: function (responseJSON) {
-            showAlert("success", "Stats Deleted!", "All stats files were deleted successfully.");
-        },
-        invalidToken: function () {
-            showPageLogin();
-        }
-    });
-
-    return false;
-}
-
-function resetImportAllowedZonesModal() {
-
-    $("#divImportAllowedZonesAlert").html("");
-    $("#txtImportAllowedZones").val("");
-
-    setTimeout(function () {
-        $("#txtImportAllowedZones").focus();
-    }, 1000);
-
-    return false;
-}
-
-function importAllowedZones() {
-    var divImportAllowedZonesAlert = $("#divImportAllowedZonesAlert");
-    var allowedZones = cleanTextList($("#txtImportAllowedZones").val());
-
-    if ((allowedZones.length === 0) || (allowedZones === ",")) {
-        showAlert("warning", "Missing!", "Please enter allowed zones to import.", divImportAllowedZonesAlert);
-        $("#txtImportAllowedZones").focus();
-        return false;
-    }
-
-    var btn = $("#btnImportAllowedZones").button('loading');
-
-    HTTPRequest({
-        url: "/api/importAllowedZones?token=" + token,
-        data: "allowedZones=" + allowedZones,
-        success: function (responseJSON) {
-            $("#modalImportAllowedZones").modal("hide");
-            btn.button('reset');
-
-            showAlert("success", "Imported!", "Domain names were imported to allowed zone successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        },
-        objAlertPlaceholder: divImportAllowedZonesAlert
-    });
-
-    return false;
-}
-
-function exportAllowedZones() {
-
-    window.open("/api/exportAllowedZones?token=" + token, "_blank");
-
-    showAlert("success", "Exported!", "Allowed zones were exported successfully.");
-
-    return false;
-}
-
-function resetImportBlockedZonesModal() {
-
-    $("#divImportBlockedZonesAlert").html("");
-    $("#txtImportBlockedZones").val("");
-
-    setTimeout(function () {
-        $("#txtImportBlockedZones").focus();
-    }, 1000);
-
-    return false;
-}
-
-function importBlockedZones() {
-    var divImportBlockedZonesAlert = $("#divImportBlockedZonesAlert");
-    var blockedZones = cleanTextList($("#txtImportBlockedZones").val());
-
-    if ((blockedZones.length === 0) || (blockedZones === ",")) {
-        showAlert("warning", "Missing!", "Please enter blocked zones to import.", divImportBlockedZonesAlert);
-        $("#txtImportBlockedZones").focus();
-        return false;
-    }
-
-    var btn = $("#btnImportBlockedZones").button('loading');
-
-    HTTPRequest({
-        url: "/api/importBlockedZones?token=" + token,
-        data: "blockedZones=" + blockedZones,
-        success: function (responseJSON) {
-            $("#modalImportBlockedZones").modal("hide");
-            btn.button('reset');
-
-            showAlert("success", "Imported!", "Domain names were imported to blocked zone successfully.");
-        },
-        error: function () {
-            btn.button('reset');
-        },
-        invalidToken: function () {
-            btn.button('reset');
-            showPageLogin();
-        },
-        objAlertPlaceholder: divImportBlockedZonesAlert
-    });
-
-    return false;
-}
-
-function exportBlockedZones() {
-
-    window.open("/api/exportBlockedZones?token=" + token, "_blank");
-
-    showAlert("success", "Exported!", "Blocked zones were exported successfully.");
-
-    return false;
+        $("#optDnsClientNameServers").prepend('<li><a href="#">' + htmlEncode(txtServerName) + '</a></li>');
 }
 
 function resetBackupSettingsModal() {
     $("#divBackupSettingsAlert").html("");
 
+    $("#chkBackupAuthConfig").prop("checked", true);
     $("#chkBackupDnsSettings").prop("checked", true);
     $("#chkBackupLogSettings").prop("checked", true);
     $("#chkBackupZones").prop("checked", true);
@@ -2310,8 +2172,6 @@ function resetBackupSettingsModal() {
     $("#chkBackupStats").prop("checked", true);
     $("#chkBackupLogs").prop("checked", false);
     $("#chkBackupBlockLists").prop("checked", true);
-
-    return false;
 }
 
 function backupSettings() {
@@ -2326,19 +2186,18 @@ function backupSettings() {
     var allowedZones = $("#chkBackupAllowedZones").prop('checked');
     var blockedZones = $("#chkBackupBlockedZones").prop('checked');
     var dnsSettings = $("#chkBackupDnsSettings").prop('checked');
+    var authConfig = $("#chkBackupAuthConfig").prop('checked');
     var logSettings = $("#chkBackupLogSettings").prop('checked');
 
-    if (!blockLists && !logs && !scopes && !apps && !stats && !zones && !allowedZones && !blockedZones && !dnsSettings && !logSettings) {
+    if (!blockLists && !logs && !scopes && !apps && !stats && !zones && !allowedZones && !blockedZones && !dnsSettings && !authConfig && !logSettings) {
         showAlert("warning", "Missing!", "Please select at least one item to backup.", divBackupSettingsAlert);
-        return false;
+        return;
     }
 
-    window.open("/api/backupSettings?token=" + token + "&blockLists=" + blockLists + "&logs=" + logs + "&scopes=" + scopes + "&apps=" + apps + "&stats=" + stats + "&zones=" + zones + "&allowedZones=" + allowedZones + "&blockedZones=" + blockedZones + "&dnsSettings=" + dnsSettings + "&logSettings=" + logSettings + "&ts=" + (new Date().getTime()), "_blank");
+    window.open("/api/settings/backup?token=" + sessionData.token + "&blockLists=" + blockLists + "&logs=" + logs + "&scopes=" + scopes + "&apps=" + apps + "&stats=" + stats + "&zones=" + zones + "&allowedZones=" + allowedZones + "&blockedZones=" + blockedZones + "&dnsSettings=" + dnsSettings + "&authConfig=" + authConfig + "&logSettings=" + logSettings + "&ts=" + (new Date().getTime()), "_blank");
 
     $("#modalBackupSettings").modal("hide");
     showAlert("success", "Backed Up!", "Settings were backed up successfully.");
-
-    return false;
 }
 
 function resetRestoreSettingsModal() {
@@ -2346,6 +2205,7 @@ function resetRestoreSettingsModal() {
 
     $("#fileBackupZip").val("");
 
+    $("#chkRestoreAuthConfig").prop("checked", true);
     $("#chkRestoreDnsSettings").prop("checked", true);
     $("#chkRestoreLogSettings").prop("checked", true);
     $("#chkRestoreZones").prop("checked", true);
@@ -2356,8 +2216,6 @@ function resetRestoreSettingsModal() {
     $("#chkRestoreLogs").prop("checked", false);
     $("#chkRestoreBlockLists").prop("checked", true);
     $("#chkDeleteExistingFiles").prop("checked", true);
-
-    return false;
 }
 
 function restoreSettings() {
@@ -2368,7 +2226,7 @@ function restoreSettings() {
     if (fileBackupZip[0].files.length === 0) {
         showAlert("warning", "Missing!", "Please select a backup zip file to restore.", divRestoreSettingsAlert);
         fileBackupZip.focus();
-        return false;
+        return;
     }
 
     var blockLists = $("#chkRestoreBlockLists").prop('checked');
@@ -2380,13 +2238,14 @@ function restoreSettings() {
     var allowedZones = $("#chkRestoreAllowedZones").prop('checked');
     var blockedZones = $("#chkRestoreBlockedZones").prop('checked');
     var dnsSettings = $("#chkRestoreDnsSettings").prop('checked');
+    var authConfig = $("#chkRestoreAuthConfig").prop('checked');
     var logSettings = $("#chkRestoreLogSettings").prop('checked');
 
     var deleteExistingFiles = $("#chkDeleteExistingFiles").prop('checked');
 
-    if (!blockLists && !logs && !scopes && !apps && !stats && !zones && !allowedZones && !blockedZones && !dnsSettings && !logSettings) {
+    if (!blockLists && !logs && !scopes && !apps && !stats && !zones && !allowedZones && !blockedZones && !dnsSettings && !authConfig && !logSettings) {
         showAlert("warning", "Missing!", "Please select at least one item to restore.", divRestoreSettingsAlert);
-        return false;
+        return;
     }
 
     var formData = new FormData();
@@ -2395,9 +2254,9 @@ function restoreSettings() {
     var btn = $("#btnRestoreSettings").button('loading');
 
     HTTPRequest({
-        url: "/api/restoreSettings?token=" + token + "&blockLists=" + blockLists + "&logs=" + logs + "&scopes=" + scopes + "&apps=" + apps + "&stats=" + stats + "&zones=" + zones + "&allowedZones=" + allowedZones + "&blockedZones=" + blockedZones + "&dnsSettings=" + dnsSettings + "&logSettings=" + logSettings + "&deleteExistingFiles=" + deleteExistingFiles,
+        url: "/api/settings/restore?token=" + sessionData.token + "&blockLists=" + blockLists + "&logs=" + logs + "&scopes=" + scopes + "&apps=" + apps + "&stats=" + stats + "&zones=" + zones + "&allowedZones=" + allowedZones + "&blockedZones=" + blockedZones + "&dnsSettings=" + dnsSettings + "&authConfig=" + authConfig + "&logSettings=" + logSettings + "&deleteExistingFiles=" + deleteExistingFiles,
         data: formData,
-        dataIsFormData: true,
+        processData: false,
         success: function (responseJSON) {
             document.title = responseJSON.response.dnsServerDomain + " - " + "Technitium DNS Server v" + responseJSON.response.version;
             $("#lblDnsServerDomain").text(" - " + responseJSON.response.dnsServerDomain);
@@ -2419,6 +2278,4 @@ function restoreSettings() {
         },
         objAlertPlaceholder: divRestoreSettingsAlert
     });
-
-    return false;
 }

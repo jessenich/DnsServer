@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,28 +17,26 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
-using DnsApplicationCommon;
-using MaxMind.GeoIP2;
+using DnsServerCore.ApplicationCommon;
 using MaxMind.GeoIP2.Model;
 using MaxMind.GeoIP2.Responses;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
-using TechnitiumLibrary.IO;
+using TechnitiumLibrary;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace GeoDistance
 {
-    public sealed class Address : IDnsApplicationRequestHandler
+    public sealed class Address : IDnsApplication, IDnsAppRecordRequestHandler
     {
         #region variables
 
-        DatabaseReader _mmCityReader;
+        MaxMind _maxMind;
 
         #endregion
 
@@ -53,8 +51,8 @@ namespace GeoDistance
 
             if (disposing)
             {
-                if (_mmCityReader != null)
-                    _mmCityReader.Dispose();
+                if (_maxMind is not null)
+                    _maxMind.Dispose();
             }
 
             _disposed = true;
@@ -86,23 +84,12 @@ namespace GeoDistance
 
         public Task InitializeAsync(IDnsServer dnsServer, string config)
         {
-            if (_mmCityReader == null)
-            {
-                string mmFile = Path.Combine(dnsServer.ApplicationFolder, "GeoIP2-City.mmdb");
-
-                if (!File.Exists(mmFile))
-                    mmFile = Path.Combine(dnsServer.ApplicationFolder, "GeoLite2-City.mmdb");
-
-                if (!File.Exists(mmFile))
-                    throw new FileNotFoundException("MaxMind City file is missing!");
-
-                _mmCityReader = new DatabaseReader(mmFile);
-            }
+            _maxMind = MaxMind.Create(dnsServer);
 
             return Task.CompletedTask;
         }
 
-        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, string zoneName, uint appRecordTtl, string appRecordData, bool isRecursionAllowed, IDnsServer dnsServer)
+        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, string appRecordName, uint appRecordTtl, string appRecordData)
         {
             DnsQuestionRecord question = request.Question[0];
             switch (question.Type)
@@ -111,7 +98,7 @@ namespace GeoDistance
                 case DnsResourceRecordType.AAAA:
                     Location location = null;
 
-                    if (_mmCityReader.TryCity(remoteEP.Address, out CityResponse response))
+                    if (_maxMind.DatabaseReader.TryCity(remoteEP.Address, out CityResponse response))
                         location = response.Location;
 
                     dynamic jsonAppRecordData = JsonConvert.DeserializeObject(appRecordData);
@@ -153,7 +140,7 @@ namespace GeoDistance
                                 IPAddress address = IPAddress.Parse(jsonAddress.Value);
 
                                 if (address.AddressFamily == AddressFamily.InterNetwork)
-                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, DnsClass.IN, appRecordTtl, new DnsARecord(address)));
+                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, DnsClass.IN, appRecordTtl, new DnsARecordData(address)));
                             }
                             break;
 
@@ -163,7 +150,7 @@ namespace GeoDistance
                                 IPAddress address = IPAddress.Parse(jsonAddress.Value);
 
                                 if (address.AddressFamily == AddressFamily.InterNetworkV6)
-                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, DnsClass.IN, appRecordTtl, new DnsAAAARecord(address)));
+                                    answers.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, DnsClass.IN, appRecordTtl, new DnsAAAARecordData(address)));
                             }
                             break;
                     }

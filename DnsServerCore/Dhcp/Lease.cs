@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -88,7 +88,7 @@ namespace DnsServerCore.Dhcp
                         _hostName = null;
 
                     _hardwareAddress = bR.ReadBuffer();
-                    _address = IPAddressExtension.Parse(bR);
+                    _address = IPAddressExtension.ReadFrom(bR);
 
                     if (version >= 2)
                     {
@@ -97,8 +97,8 @@ namespace DnsServerCore.Dhcp
                             _comments = null;
                     }
 
-                    _leaseObtained = bR.ReadDate();
-                    _leaseExpires = bR.ReadDate();
+                    _leaseObtained = bR.ReadDateTime();
+                    _leaseExpires = bR.ReadDateTime();
                     break;
 
                 default:
@@ -169,7 +169,7 @@ namespace DnsServerCore.Dhcp
             bW.Write(_leaseExpires);
         }
 
-        public string GetClientFullIdentifier()
+        public string GetClientInfo()
         {
             string hardwareAddress = BitConverter.ToString(_hardwareAddress);
 

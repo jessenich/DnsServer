@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,7 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
-using DnsApplicationCommon;
+using DnsServerCore.ApplicationCommon;
 using System;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net.Dns;
@@ -30,46 +30,55 @@ namespace DnsServerCore.Dns.Applications
         #region variables
 
         readonly DnsServer _dnsServer;
-        readonly string _appName;
+        readonly string _applicationName;
         readonly string _applicationFolder;
 
         #endregion
 
         #region constructor
 
-        public DnsServerInternal(DnsServer dnsServer, string appName, string applicationFolder)
+        public DnsServerInternal(DnsServer dnsServer, string applicationName, string applicationFolder)
         {
             _dnsServer = dnsServer;
-            _appName = appName;
+            _applicationName = applicationName;
             _applicationFolder = applicationFolder;
         }
 
         #endregion
 
-        public Task<DnsDatagram> DirectQueryAsync(DnsQuestionRecord question, int timeout = 2000)
+        #region public
+
+        public Task<DnsDatagram> DirectQueryAsync(DnsQuestionRecord question, int timeout = 4000)
         {
-            return _dnsServer.DirectQueryAsync(question, timeout);
+            return _dnsServer.DirectQueryAsync(question, timeout, true);
         }
 
         public void WriteLog(string message)
         {
             LogManager log = _dnsServer.LogManager;
             if (log != null)
-                log.Write("DNS App [" + _appName + "]: " + message);
+                log.Write("DNS App [" + _applicationName + "]: " + message);
         }
 
         public void WriteLog(Exception ex)
         {
             LogManager log = _dnsServer.LogManager;
             if (log != null)
-                log.Write("DNS App [" + _appName + "]: " + ex.ToString());
+                log.Write("DNS App [" + _applicationName + "]: " + ex.ToString());
         }
 
-        public string ServerDomain
-        { get { return _dnsServer.ServerDomain; } }
+        #endregion
+
+        #region properties
+
+        public string ApplicationName
+        { get { return _applicationName; } }
 
         public string ApplicationFolder
         { get { return _applicationFolder; } }
+
+        public string ServerDomain
+        { get { return _dnsServer.ServerDomain; } }
 
         public IDnsCache DnsCache
         { get { return _dnsServer.DnsCache; } }
@@ -79,5 +88,7 @@ namespace DnsServerCore.Dns.Applications
 
         public bool PreferIPv6
         { get { return _dnsServer.PreferIPv6; } }
+
+        #endregion
     }
 }

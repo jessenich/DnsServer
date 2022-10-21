@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,17 +22,20 @@ using System.Threading.Tasks;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Proxy;
 
-namespace DnsApplicationCommon
+namespace DnsServerCore.ApplicationCommon
 {
+    /// <summary>
+    /// Provides an interface to access the internal DNS Server core.
+    /// </summary>
     public interface IDnsServer
     {
         /// <summary>
-        /// Allows querying the DNS server directly. This call supports recursion even if its not enabled in the DNS server configuration. The request and its response are not counted in any stats or logged..
+        /// Allows querying the DNS server core directly. This call supports recursion even if its not enabled in the DNS server configuration. The request wont be routed to any of the installed DNS Apps except for processing APP records. The request and its response are not counted in any stats or logged.
         /// </summary>
         /// <param name="question">The question record containing the details to query.</param>
-        /// <param name="timeout">The time the request should wait async for an response.</param>
-        /// <returns>The DNS response for the DNS query or <c>null</c> if the request timed out.</returns>
-        Task<DnsDatagram> DirectQueryAsync(DnsQuestionRecord question, int timeout = 2000);
+        /// <returns>The DNS response for the DNS query.</returns>
+        /// <exception cref="TimeoutException">When request times out.</exception>
+        Task<DnsDatagram> DirectQueryAsync(DnsQuestionRecord question, int timeout = 4000);
 
         /// <summary>
         /// Writes a log entry to the DNS server log file.
@@ -47,14 +50,19 @@ namespace DnsApplicationCommon
         void WriteLog(Exception ex);
 
         /// <summary>
-        /// The primary domain name used by this DNS Server to identify itself.
+        /// The name of this installed application.
         /// </summary>
-        string ServerDomain { get; }
+        string ApplicationName { get; }
 
         /// <summary>
         /// The folder where this application is saved on the disk. Can be used to create temp files, read/write files, etc. for this application.
         /// </summary>
         string ApplicationFolder { get; }
+
+        /// <summary>
+        /// The primary domain name used by this DNS Server to identify itself.
+        /// </summary>
+        string ServerDomain { get; }
 
         /// <summary>
         /// The DNS cache object which provides direct access to the DNS server cache.

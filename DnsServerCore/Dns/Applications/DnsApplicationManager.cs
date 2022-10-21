@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.ApplicationCommon;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -36,6 +37,10 @@ namespace DnsServerCore.Dns.Applications
         readonly string _appsPath;
 
         readonly ConcurrentDictionary<string, DnsApplication> _applications = new ConcurrentDictionary<string, DnsApplication>();
+
+        IReadOnlyList<IDnsRequestController> _dnsRequestControllers = Array.Empty<IDnsRequestController>();
+        IReadOnlyList<IDnsAuthoritativeRequestHandler> _dnsAuthoritativeRequestHandlers = Array.Empty<IDnsAuthoritativeRequestHandler>();
+        IReadOnlyList<IDnsQueryLogger> _dnsQueryLoggers = Array.Empty<IDnsQueryLogger>();
 
         #endregion
 
@@ -80,34 +85,58 @@ namespace DnsServerCore.Dns.Applications
 
         #region private
 
-        private async Task LoadApplicationAsync(string applicationFolder)
+        private async Task<DnsApplication> LoadApplicationAsync(string applicationFolder, bool refreshAppObjectList)
         {
-            string appName = Path.GetFileName(applicationFolder);
+            string applicationName = Path.GetFileName(applicationFolder);
 
-            DnsApplication application = new DnsApplication(new DnsServerInternal(_dnsServer, appName, applicationFolder), appName);
+            DnsApplication application = new DnsApplication(new DnsServerInternal(_dnsServer, applicationName, applicationFolder), applicationName);
 
-            try
-            {
-                await application.InitializeAsync();
+            await application.InitializeAsync();
 
-                if (!_applications.TryAdd(application.AppName, application))
-                    throw new DnsServerException("DNS application already exists: " + application.AppName);
-            }
-            catch
+            if (!_applications.TryAdd(application.Name, application))
             {
                 application.Dispose();
-                throw;
+                throw new DnsServerException("DNS application already exists: " + application.Name);
             }
+
+            if (refreshAppObjectList)
+                RefreshAppObjectLists();
+
+            return application;
         }
 
-        public void UnloadApplication(string appName)
+        private void UnloadApplication(string applicationName)
         {
-            if (!_applications.TryRemove(appName, out DnsApplication existingApp))
-                throw new DnsServerException("DNS application does not exists: " + appName);
+            if (!_applications.TryRemove(applicationName, out DnsApplication existingApp))
+                throw new DnsServerException("DNS application does not exists: " + applicationName);
+
+            RefreshAppObjectLists();
 
             existingApp.Dispose();
         }
 
+        private void RefreshAppObjectLists()
+        {
+            List<IDnsRequestController> dnsRequestControllers = new List<IDnsRequestController>(1);
+            List<IDnsAuthoritativeRequestHandler> dnsAuthoritativeRequestHandlers = new List<IDnsAuthoritativeRequestHandler>(1);
+            List<IDnsQueryLogger> dnsQueryLoggers = new List<IDnsQueryLogger>(1);
+
+            foreach (KeyValuePair<string, DnsApplication> application in _applications)
+            {
+                foreach (KeyValuePair<string, IDnsRequestController> controller in application.Value.DnsRequestControllers)
+                    dnsRequestControllers.Add(controller.Value);
+
+                foreach (KeyValuePair<string, IDnsAuthoritativeRequestHandler> handler in application.Value.DnsAuthoritativeRequestHandlers)
+                    dnsAuthoritativeRequestHandlers.Add(handler.Value);
+
+                foreach (KeyValuePair<string, IDnsQueryLogger> logger in application.Value.DnsQueryLoggers)
+                    dnsQueryLoggers.Add(logger.Value);
+            }
+
+            _dnsRequestControllers = dnsRequestControllers;
+            _dnsAuthoritativeRequestHandlers = dnsAuthoritativeRequestHandlers;
+            _dnsQueryLoggers = dnsQueryLoggers;
+        }
 
         #endregion
 
@@ -130,6 +159,9 @@ namespace DnsServerCore.Dns.Applications
             }
 
             _applications.Clear();
+            _dnsRequestControllers = Array.Empty<IDnsRequestController>();
+            _dnsAuthoritativeRequestHandlers = Array.Empty<IDnsAuthoritativeRequestHandler>();
+            _dnsQueryLoggers = Array.Empty<IDnsQueryLogger>();
         }
 
         public void LoadAllApplications()
@@ -142,7 +174,8 @@ namespace DnsServerCore.Dns.Applications
                 {
                     try
                     {
-                        await LoadApplicationAsync(applicationFolder);
+                        _ = await LoadApplicationAsync(applicationFolder, false);
+                        RefreshAppObjectLists();
 
                         LogManager log = _dnsServer.LogManager;
                         if (log != null)
@@ -158,14 +191,20 @@ namespace DnsServerCore.Dns.Applications
             }
         }
 
-        public async Task InstallApplicationAsync(string appName, Stream appStream)
+        public async Task<DnsApplication> InstallApplicationAsync(string applicationName, Stream appStream)
         {
-            if (_applications.ContainsKey(appName))
-                throw new DnsServerException("DNS application already exists: " + appName);
+            foreach (char invalidChar in Path.GetInvalidFileNameChars())
+            {
+                if (applicationName.Contains(invalidChar))
+                    throw new DnsServerException("The application name contains an invalid character: " + invalidChar);
+            }
+
+            if (_applications.ContainsKey(applicationName))
+                throw new DnsServerException("DNS application already exists: " + applicationName);
 
             using (ZipArchive appZip = new ZipArchive(appStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
-                string applicationFolder = Path.Combine(_appsPath, appName);
+                string applicationFolder = Path.Combine(_appsPath, applicationName);
 
                 if (Directory.Exists(applicationFolder))
                     Directory.Delete(applicationFolder, true);
@@ -174,7 +213,7 @@ namespace DnsServerCore.Dns.Applications
                 {
                     appZip.ExtractToDirectory(applicationFolder, true);
 
-                    await LoadApplicationAsync(applicationFolder);
+                    return await LoadApplicationAsync(applicationFolder, true);
                 }
                 catch
                 {
@@ -186,27 +225,46 @@ namespace DnsServerCore.Dns.Applications
             }
         }
 
-        public async Task UpdateApplicationAsync(string appName, Stream appStream)
+        public async Task<DnsApplication> UpdateApplicationAsync(string applicationName, Stream appStream)
         {
-            if (!_applications.ContainsKey(appName))
-                throw new DnsServerException("DNS application does not exists: " + appName);
+            if (!_applications.ContainsKey(applicationName))
+                throw new DnsServerException("DNS application does not exists: " + applicationName);
 
             using (ZipArchive appZip = new ZipArchive(appStream, ZipArchiveMode.Read, false, Encoding.UTF8))
             {
-                UnloadApplication(appName);
+                UnloadApplication(applicationName);
 
-                string applicationFolder = Path.Combine(_appsPath, appName);
+                string applicationFolder = Path.Combine(_appsPath, applicationName);
 
-                appZip.ExtractToDirectory(applicationFolder, true);
+                foreach (ZipArchiveEntry entry in appZip.Entries)
+                {
+                    string entryPath = entry.FullName;
 
-                await LoadApplicationAsync(applicationFolder);
+                    if (Path.DirectorySeparatorChar != '/')
+                        entryPath = entryPath.Replace('/', '\\');
+
+                    string filePath = Path.Combine(applicationFolder, entryPath);
+
+                    if ((entry.Name == "dnsApp.config") && File.Exists(filePath))
+                        continue; //avoid overwriting existing config file
+
+                    Directory.CreateDirectory(Path.GetDirectoryName(filePath));
+
+                    entry.ExtractToFile(filePath, true);
+                }
+
+                return await LoadApplicationAsync(applicationFolder, true);
             }
         }
 
-        public void UninstallApplication(string appName)
+        public void UninstallApplication(string applicationName)
         {
-            if (_applications.TryRemove(appName, out DnsApplication app))
+            if (_applications.TryRemove(applicationName, out DnsApplication app))
+            {
+                RefreshAppObjectLists();
+
                 app.Dispose();
+            }
 
             if (Directory.Exists(app.DnsServer.ApplicationFolder))
                 Directory.Delete(app.DnsServer.ApplicationFolder, true);
@@ -218,6 +276,15 @@ namespace DnsServerCore.Dns.Applications
 
         public IReadOnlyDictionary<string, DnsApplication> Applications
         { get { return _applications; } }
+
+        public IReadOnlyList<IDnsRequestController> DnsRequestControllers
+        { get { return _dnsRequestControllers; } }
+
+        public IReadOnlyList<IDnsAuthoritativeRequestHandler> DnsAuthoritativeRequestHandlers
+        { get { return _dnsAuthoritativeRequestHandlers; } }
+
+        public IReadOnlyList<IDnsQueryLogger> DnsQueryLoggers
+        { get { return _dnsQueryLoggers; } }
 
         #endregion
     }

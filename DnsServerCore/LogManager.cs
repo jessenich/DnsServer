@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -27,10 +27,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore
 {
-    public class LogManager : IDisposable
+    public sealed class LogManager : IDisposable
     {
         #region variables
 
@@ -83,7 +84,8 @@ namespace DnsServerCore
 
                         lock (_logFileLock)
                         {
-                            WriteLog(DateTime.UtcNow, e.ExceptionObject.ToString());
+                            if (_logOut != null)
+                                WriteLog(DateTime.UtcNow, e.ExceptionObject.ToString());
                         }
                     }
                     catch (Exception ex)
@@ -152,7 +154,7 @@ namespace DnsServerCore
 
         bool _disposed;
 
-        protected virtual void Dispose(bool disposing)
+        private void Dispose(bool disposing)
         {
             lock (_queueLock)
             {
@@ -216,13 +218,28 @@ namespace DnsServerCore
 
                         foreach (LogQueueItem item in _queue.GetConsumingEnumerable(_queueCancellationTokenSource.Token))
                         {
-                            if (item._dateTime.Date > _logDate.Date)
+                            if (_useLocalTime)
                             {
-                                WriteLog(DateTime.UtcNow, "Logging stopped.");
-                                StartNewLog();
-                            }
+                                DateTime messageLocalDateTime = item._dateTime.ToLocalTime();
 
-                            WriteLog(item._dateTime, item._message);
+                                if (messageLocalDateTime.Date > _logDate)
+                                {
+                                    WriteLog(DateTime.UtcNow, "Logging stopped.");
+                                    StartNewLog();
+                                }
+
+                                WriteLog(messageLocalDateTime, item._message);
+                            }
+                            else
+                            {
+                                if (item._dateTime.Date > _logDate)
+                                {
+                                    WriteLog(DateTime.UtcNow, "Logging stopped.");
+                                    StartNewLog();
+                                }
+
+                                WriteLog(item._dateTime, item._message);
+                            }
                         }
                     }
                     catch (OperationCanceledException)
@@ -369,26 +386,36 @@ namespace DnsServerCore
             if (!Directory.Exists(logFolder))
                 Directory.CreateDirectory(logFolder);
 
-            DateTime logDate;
+            DateTime logStartDateTime;
 
             if (_useLocalTime)
-                logDate = DateTime.Now;
+                logStartDateTime = DateTime.Now;
             else
-                logDate = DateTime.UtcNow;
+                logStartDateTime = DateTime.UtcNow;
 
-            _logFile = Path.Combine(logFolder, logDate.ToString(LOG_FILE_DATE_TIME_FORMAT) + ".log");
+            _logFile = Path.Combine(logFolder, logStartDateTime.ToString(LOG_FILE_DATE_TIME_FORMAT) + ".log");
             _logOut = new StreamWriter(new FileStream(_logFile, FileMode.Append, FileAccess.Write, FileShare.Read));
-            _logDate = logDate;
+            _logDate = logStartDateTime.Date;
 
-            WriteLog(logDate, "Logging started.");
+            WriteLog(logStartDateTime, "Logging started.");
         }
 
         private void WriteLog(DateTime dateTime, string message)
         {
             if (_useLocalTime)
-                _logOut.WriteLine("[" + dateTime.ToLocalTime().ToString(LOG_ENTRY_DATE_TIME_FORMAT) + " Local] " + message);
+            {
+                if (dateTime.Kind == DateTimeKind.Local)
+                    _logOut.WriteLine("[" + dateTime.ToString(LOG_ENTRY_DATE_TIME_FORMAT) + " Local] " + message);
+                else
+                    _logOut.WriteLine("[" + dateTime.ToLocalTime().ToString(LOG_ENTRY_DATE_TIME_FORMAT) + " Local] " + message);
+            }
             else
-                _logOut.WriteLine("[" + dateTime.ToString(LOG_ENTRY_DATE_TIME_FORMAT) + " UTC] " + message);
+            {
+                if (dateTime.Kind == DateTimeKind.Utc)
+                    _logOut.WriteLine("[" + dateTime.ToString(LOG_ENTRY_DATE_TIME_FORMAT) + " UTC] " + message);
+                else
+                    _logOut.WriteLine("[" + dateTime.ToUniversalTime().ToString(LOG_ENTRY_DATE_TIME_FORMAT) + " UTC] " + message);
+            }
 
             _logOut.Flush();
         }
@@ -406,7 +433,7 @@ namespace DnsServerCore
         {
             string logFileName = logName + ".log";
 
-            using (FileStream fS = new FileStream(Path.Combine(ConvertToAbsolutePath(_logFolder), logFileName), FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (FileStream fS = new FileStream(Path.Combine(ConvertToAbsolutePath(_logFolder), logFileName), FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 64 * 1024, true))
             {
                 response.ContentType = "text/plain";
                 response.AddHeader("Content-Disposition", "attachment;filename=" + logFileName);
@@ -422,7 +449,7 @@ namespace DnsServerCore
 
                     if (fS.Length > limit)
                     {
-                        byte[] buffer = Encoding.UTF8.GetBytes("####___TRUNCATED___####");
+                        byte[] buffer = Encoding.UTF8.GetBytes("\r\n####___TRUNCATED___####");
                         s.Write(buffer, 0, buffer.Length);
                     }
                 }
@@ -485,19 +512,19 @@ namespace DnsServerCore
         {
             DnsQuestionRecord q = null;
 
-            if (request.QDCOUNT > 0)
+            if (request.Question.Count > 0)
                 q = request.Question[0];
 
             string question;
 
-            if (q == null)
+            if (q is null)
                 question = "MISSING QUESTION!";
             else
                 question = "QNAME: " + q.Name + "; QTYPE: " + q.Type.ToString() + "; QCLASS: " + q.Class;
 
             string responseInfo;
 
-            if (response == null)
+            if (response is null)
             {
                 responseInfo = " NO RESPONSE FROM SERVER!";
             }
@@ -505,9 +532,13 @@ namespace DnsServerCore
             {
                 string answer;
 
-                if (response.ANCOUNT == 0)
+                if (response.Answer.Count == 0)
                 {
                     answer = "[]";
+                }
+                else if ((response.Answer.Count > 2) && response.IsZoneTransfer)
+                {
+                    answer = "[ZONE TRANSFER]";
                 }
                 else
                 {
@@ -515,13 +546,43 @@ namespace DnsServerCore
 
                     for (int i = 0; i < response.Answer.Count; i++)
                     {
-                        if (i != 0)
+                        if (i > 0)
                             answer += ", ";
 
                         answer += response.Answer[i].RDATA.ToString();
                     }
 
                     answer += "]";
+
+                    if (response.Additional.Count > 0)
+                    {
+                        switch (q.Type)
+                        {
+                            case DnsResourceRecordType.NS:
+                            case DnsResourceRecordType.MX:
+                            case DnsResourceRecordType.SRV:
+                                answer += "; ADDITIONAL: [";
+
+                                for (int i = 0; i < response.Additional.Count; i++)
+                                {
+                                    DnsResourceRecord additional = response.Additional[i];
+
+                                    switch (additional.Type)
+                                    {
+                                        case DnsResourceRecordType.A:
+                                        case DnsResourceRecordType.AAAA:
+                                            if (i > 0)
+                                                answer += ", ";
+
+                                            answer += additional.Name + " (" + additional.RDATA.ToString() + ")";
+                                            break;
+                                    }
+                                }
+
+                                answer += "]";
+                                break;
+                        }
+                    }
                 }
 
                 responseInfo = " RCODE: " + response.RCODE.ToString() + "; ANSWER: " + answer;
@@ -642,7 +703,7 @@ namespace DnsServerCore
             set
             {
                 if (value < 0)
-                    throw new ArgumentOutOfRangeException("MaxLogFileDays must be greater than or equal to 0.");
+                    throw new ArgumentOutOfRangeException(nameof(MaxLogFileDays), "MaxLogFileDays must be greater than or equal to 0.");
 
                 _maxLogFileDays = value;
 

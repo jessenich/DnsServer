@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2019  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -19,47 +19,35 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 using System;
 
-namespace DnsServerCore
+namespace Failover
 {
-    class UserSession
+    enum HealthStatus
+    {
+        Unknown = 0,
+        Failed = 1,
+        Healthy = 2,
+        Maintenance = 3
+    }
+
+    class HealthCheckResponse
     {
         #region variables
 
-        const int SESSION_TIMEOUT = 30 * 60 * 1000; //30 mins
-
-        readonly string _username;
-        DateTime _lastSeen;
+        public readonly DateTime DateTime = DateTime.UtcNow;
+        public readonly HealthStatus Status;
+        public readonly string FailureReason;
+        public readonly Exception Exception;
 
         #endregion
 
         #region constructor
 
-        public UserSession(string username)
+        public HealthCheckResponse(HealthStatus status, string failureReason = null, Exception exception = null)
         {
-            _username = username;
-            _lastSeen = DateTime.UtcNow;
+            Status = status;
+            FailureReason = failureReason;
+            Exception = exception;
         }
-
-        #endregion
-
-        #region public
-
-        public void UpdateLastSeen()
-        {
-            _lastSeen = DateTime.UtcNow;
-        }
-
-        public bool HasExpired()
-        {
-            return _lastSeen.AddMilliseconds(SESSION_TIMEOUT) < DateTime.UtcNow;
-        }
-
-        #endregion
-
-        #region properties
-
-        public string Username
-        { get { return _username; } }
 
         #endregion
     }

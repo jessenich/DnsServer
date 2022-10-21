@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -36,8 +36,8 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         readonly AuthZoneManager _zoneManager;
 
-        DnsSOARecord _soaRecord;
-        DnsNSRecord _nsRecord;
+        DnsSOARecordData _soaRecord;
+        DnsNSRecordData _nsRecord;
 
         #endregion
 
@@ -58,8 +58,8 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         private void UpdateServerDomain(string serverDomain)
         {
-            _soaRecord = new DnsSOARecord(serverDomain, "hostadmin." + serverDomain, 1, 14400, 3600, 604800, 900);
-            _nsRecord = new DnsNSRecord(serverDomain);
+            _soaRecord = new DnsSOARecordData(serverDomain, "hostadmin@" + serverDomain, 1, 900, 300, 604800, 60);
+            _nsRecord = new DnsNSRecordData(serverDomain);
 
             _zoneManager.ServerDomain = serverDomain;
         }
@@ -136,7 +136,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public bool BlockZone(string domain)
         {
-            if (_zoneManager.CreateInternalPrimaryZone(domain, _soaRecord, _nsRecord) != null)
+            if (_zoneManager.CreateSpecialPrimaryZone(domain, _soaRecord, _nsRecord) != null)
                 return true;
 
             return false;
@@ -150,19 +150,24 @@ namespace DnsServerCore.Dns.ZoneManagers
             return false;
         }
 
+        public void Flush()
+        {
+            _zoneManager.Flush();
+        }
+
         public List<AuthZoneInfo> ListZones()
         {
             return _zoneManager.ListZones();
         }
 
-        public List<string> ListSubDomains(string domain)
+        public void ListAllRecords(string domain, List<DnsResourceRecord> records)
         {
-            return _zoneManager.ListSubDomains(domain);
+            _zoneManager.ListAllRecords(domain, records);
         }
 
-        public IReadOnlyList<DnsResourceRecord> QueryRecords(string domain, DnsResourceRecordType type)
+        public void ListSubDomains(string domain, List<string> subDomains)
         {
-            return _zoneManager.QueryRecords(domain, type);
+            _zoneManager.ListSubDomains(domain, subDomains);
         }
 
         public void SaveZoneFile()
@@ -197,6 +202,9 @@ namespace DnsServerCore.Dns.ZoneManagers
         #endregion
 
         #region properties
+
+        internal DnsSOARecordData DnsSOARecord
+        { get { return _soaRecord; } }
 
         public string ServerDomain
         {

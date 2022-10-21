@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Dns.Applications;
 using DnsServerCore.Dns.ZoneManagers;
 using TechnitiumLibrary.Net.Dns;
 
@@ -26,47 +27,36 @@ namespace DnsServerCore.Dns
     {
         #region variables
 
-        readonly DnsQuestionRecord _prefetchQuery;
+        readonly DnsQuestionRecord _prefetchQuestion;
 
         #endregion
 
         #region constructor
 
-        public ResolverPrefetchDnsCache(AuthZoneManager authZoneManager, CacheZoneManager cacheZoneManager, DnsQuestionRecord prefetchQuery)
-            : base(authZoneManager, cacheZoneManager)
+        public ResolverPrefetchDnsCache(DnsApplicationManager dnsApplicationManager, AuthZoneManager authZoneManager, CacheZoneManager cacheZoneManager, LogManager log, DnsQuestionRecord prefetchQuestion)
+            : base(dnsApplicationManager, authZoneManager, cacheZoneManager, log)
         {
-            _prefetchQuery = prefetchQuery;
+            _prefetchQuestion = prefetchQuestion;
         }
 
         #endregion
 
         #region public
 
-        public override DnsDatagram Query(DnsDatagram request, bool serveStale = false)
+        public override DnsDatagram Query(DnsDatagram request, bool serveStaleAndResetExpiry = false, bool findClosestNameServers = false)
         {
-            if (_prefetchQuery.Equals(request.Question[0]))
+            if (_prefetchQuestion.Equals(request.Question[0]))
             {
+                //request is for prefetch question
+
+                if (!findClosestNameServers)
+                    return null; //dont give answer from cache for prefetch question
+
                 //return closest name servers so that the recursive resolver queries them to refreshes cache instead of returning response from cache
-                DnsDatagram authResponse = _authZoneManager.QueryClosestDelegation(request);
-                DnsDatagram cacheResponse = _cacheZoneManager.QueryClosestDelegation(request);
-
-                if ((authResponse != null) && (authResponse.Authority.Count > 0))
-                {
-                    if ((cacheResponse != null) && (cacheResponse.Authority.Count > 0))
-                    {
-                        if (cacheResponse.Authority[0].Name.Length > authResponse.Authority[0].Name.Length)
-                            return cacheResponse;
-                    }
-
-                    return authResponse;
-                }
-                else
-                {
-                    return cacheResponse;
-                }
+                return QueryClosestDelegation(request);
             }
 
-            return base.Query(request, serveStale);
+            return base.Query(request, serveStaleAndResetExpiry, findClosestNameServers);
         }
 
         #endregion

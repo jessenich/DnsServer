@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,12 +17,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Dns.Dnssec;
+using DnsServerCore.Dns.ResourceRecords;
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Net;
 using System.Threading.Tasks;
 using TechnitiumLibrary.IO;
+using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Dns.Zones
 {
@@ -39,12 +44,25 @@ namespace DnsServerCore.Dns.Zones
     {
         #region variables
 
-        readonly AuthZone _zone;
+        readonly ApexZone _apexZone;
 
         readonly string _name;
         readonly AuthZoneType _type;
         readonly bool _disabled;
+        readonly AuthZoneTransfer _zoneTransfer;
+        readonly IReadOnlyCollection<IPAddress> _zoneTransferNameServers;
+        readonly AuthZoneNotify _notify;
+        readonly IReadOnlyCollection<IPAddress> _notifyNameServers;
+        readonly AuthZoneUpdate _update;
+        readonly IReadOnlyCollection<IPAddress> _updateIpAddresses;
         readonly DateTime _expiry;
+        readonly IReadOnlyList<DnsResourceRecord> _zoneHistory; //for IXFR support
+        readonly IReadOnlyDictionary<string, object> _zoneTransferTsigKeyNames;
+        readonly IReadOnlyDictionary<string, object> _updateTsigKeyNames;
+        readonly IReadOnlyCollection<DnssecPrivateKey> _dnssecPrivateKeys;
+
+        readonly bool _notifyFailed; //not serialized
+        readonly bool _syncFailed; //not serialized
 
         #endregion
 
@@ -55,25 +73,202 @@ namespace DnsServerCore.Dns.Zones
             _name = name;
             _type = type;
             _disabled = disabled;
+
+            switch (_type)
+            {
+                case AuthZoneType.Primary:
+                    _zoneTransfer = AuthZoneTransfer.AllowOnlyZoneNameServers;
+                    _notify = AuthZoneNotify.ZoneNameServers;
+                    _update = AuthZoneUpdate.Deny;
+                    break;
+
+                default:
+                    _zoneTransfer = AuthZoneTransfer.Deny;
+                    _notify = AuthZoneNotify.None;
+                    _update = AuthZoneUpdate.Deny;
+                    break;
+            }
         }
 
         public AuthZoneInfo(BinaryReader bR)
         {
-            switch (bR.ReadByte())
+            byte version = bR.ReadByte();
+            switch (version)
             {
                 case 1:
+                case 2:
+                case 3:
+                case 4:
+                case 5:
+                case 6:
                     _name = bR.ReadShortString();
                     _type = (AuthZoneType)bR.ReadByte();
                     _disabled = bR.ReadBoolean();
 
+                    if (version >= 2)
+                    {
+                        {
+                            _zoneTransfer = (AuthZoneTransfer)bR.ReadByte();
+
+                            int count = bR.ReadByte();
+                            if (count > 0)
+                            {
+                                IPAddress[] nameServers = new IPAddress[count];
+
+                                for (int i = 0; i < count; i++)
+                                    nameServers[i] = IPAddressExtension.ReadFrom(bR);
+
+                                _zoneTransferNameServers = nameServers;
+                            }
+                        }
+
+                        {
+                            _notify = (AuthZoneNotify)bR.ReadByte();
+
+                            int count = bR.ReadByte();
+                            if (count > 0)
+                            {
+                                IPAddress[] nameServers = new IPAddress[count];
+
+                                for (int i = 0; i < count; i++)
+                                    nameServers[i] = IPAddressExtension.ReadFrom(bR);
+
+                                _notifyNameServers = nameServers;
+                            }
+                        }
+
+                        if (version >= 6)
+                        {
+                            _update = (AuthZoneUpdate)bR.ReadByte();
+
+                            int count = bR.ReadByte();
+                            if (count > 0)
+                            {
+                                IPAddress[] ipAddresses = new IPAddress[count];
+
+                                for (int i = 0; i < count; i++)
+                                    ipAddresses[i] = IPAddressExtension.ReadFrom(bR);
+
+                                _updateIpAddresses = ipAddresses;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        switch (_type)
+                        {
+                            case AuthZoneType.Primary:
+                                _zoneTransfer = AuthZoneTransfer.AllowOnlyZoneNameServers;
+                                _notify = AuthZoneNotify.ZoneNameServers;
+                                _update = AuthZoneUpdate.Deny;
+                                break;
+
+                            default:
+                                _zoneTransfer = AuthZoneTransfer.Deny;
+                                _notify = AuthZoneNotify.None;
+                                _update = AuthZoneUpdate.Deny;
+                                break;
+                        }
+                    }
+
                     switch (_type)
                     {
+                        case AuthZoneType.Primary:
+                            if (version >= 3)
+                            {
+                                int count = bR.ReadInt32();
+                                DnsResourceRecord[] zoneHistory = new DnsResourceRecord[count];
+
+                                for (int i = 0; i < count; i++)
+                                {
+                                    zoneHistory[i] = new DnsResourceRecord(bR.BaseStream);
+                                    zoneHistory[i].Tag = new DnsResourceRecordInfo(bR, zoneHistory[i].Type == DnsResourceRecordType.SOA);
+                                }
+
+                                _zoneHistory = zoneHistory;
+                            }
+
+                            if (version >= 4)
+                            {
+                                int count = bR.ReadByte();
+                                Dictionary<string, object> tsigKeyNames = new Dictionary<string, object>(count);
+
+                                for (int i = 0; i < count; i++)
+                                    tsigKeyNames.Add(bR.ReadShortString(), null);
+
+                                _zoneTransferTsigKeyNames = tsigKeyNames;
+                            }
+
+                            if (version >= 6)
+                            {
+                                int count = bR.ReadByte();
+                                Dictionary<string, object> tsigKeyNames = new Dictionary<string, object>(count);
+
+                                for (int i = 0; i < count; i++)
+                                    tsigKeyNames.Add(bR.ReadShortString(), null);
+
+                                _updateTsigKeyNames = tsigKeyNames;
+                            }
+
+                            if (version >= 5)
+                            {
+                                int count = bR.ReadByte();
+                                if (count > 0)
+                                {
+                                    List<DnssecPrivateKey> dnssecPrivateKeys = new List<DnssecPrivateKey>(count);
+
+                                    for (int i = 0; i < count; i++)
+                                        dnssecPrivateKeys.Add(DnssecPrivateKey.Parse(bR));
+
+                                    _dnssecPrivateKeys = dnssecPrivateKeys;
+                                }
+                            }
+
+                            break;
+
                         case AuthZoneType.Secondary:
-                            _expiry = bR.ReadDate();
+                            _expiry = bR.ReadDateTime();
+
+                            if (version >= 4)
+                            {
+                                int count = bR.ReadInt32();
+                                DnsResourceRecord[] zoneHistory = new DnsResourceRecord[count];
+
+                                for (int i = 0; i < count; i++)
+                                {
+                                    zoneHistory[i] = new DnsResourceRecord(bR.BaseStream);
+                                    zoneHistory[i].Tag = new DnsResourceRecordInfo(bR, zoneHistory[i].Type == DnsResourceRecordType.SOA);
+                                }
+
+                                _zoneHistory = zoneHistory;
+                            }
+
+                            if (version >= 4)
+                            {
+                                int count = bR.ReadByte();
+                                Dictionary<string, object> tsigKeyNames = new Dictionary<string, object>(count);
+
+                                for (int i = 0; i < count; i++)
+                                    tsigKeyNames.Add(bR.ReadShortString(), null);
+
+                                _zoneTransferTsigKeyNames = tsigKeyNames;
+                            }
+
+                            if (version >= 6)
+                            {
+                                int count = bR.ReadByte();
+                                Dictionary<string, object> tsigKeyNames = new Dictionary<string, object>(count);
+
+                                for (int i = 0; i < count; i++)
+                                    tsigKeyNames.Add(bR.ReadShortString(), null);
+
+                                _updateTsigKeyNames = tsigKeyNames;
+                            }
+
                             break;
 
                         case AuthZoneType.Stub:
-                            _expiry = bR.ReadDate();
+                            _expiry = bR.ReadDateTime();
                             break;
                     }
 
@@ -84,34 +279,61 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
-        internal AuthZoneInfo(AuthZone zone)
+        internal AuthZoneInfo(ApexZone apexZone, bool loadHistory = false)
         {
-            _zone = zone;
-            _name = _zone.Name;
+            _apexZone = apexZone;
+            _name = _apexZone.Name;
 
-            if (_zone is PrimaryZone)
-                _type = AuthZoneType.Primary;
-            else if (_zone is SecondaryZone)
-                _type = AuthZoneType.Secondary;
-            else if (_zone is StubZone)
-                _type = AuthZoneType.Stub;
-            else if (_zone is ForwarderZone)
-                _type = AuthZoneType.Forwarder;
-            else
-                _type = AuthZoneType.Unknown;
-
-            _disabled = _zone.Disabled;
-
-            switch (_type)
+            if (_apexZone is PrimaryZone primaryZone)
             {
-                case AuthZoneType.Secondary:
-                    _expiry = (_zone as SecondaryZone).Expiry;
-                    break;
+                _type = AuthZoneType.Primary;
 
-                case AuthZoneType.Stub:
-                    _expiry = (_zone as StubZone).Expiry;
-                    break;
+                if (loadHistory)
+                    _zoneHistory = primaryZone.GetZoneHistory();
+
+                _zoneTransferTsigKeyNames = primaryZone.ZoneTransferTsigKeyNames;
+                _updateTsigKeyNames = primaryZone.UpdateTsigKeyNames;
+                _dnssecPrivateKeys = primaryZone.DnssecPrivateKeys;
+
+                _notifyFailed = primaryZone.NotifyFailed;
             }
+            else if (_apexZone is SecondaryZone secondaryZone)
+            {
+                _type = AuthZoneType.Secondary;
+
+                if (loadHistory)
+                    _zoneHistory = secondaryZone.GetZoneHistory();
+
+                _expiry = secondaryZone.Expiry;
+                _zoneTransferTsigKeyNames = secondaryZone.ZoneTransferTsigKeyNames;
+                _updateTsigKeyNames = secondaryZone.UpdateTsigKeyNames;
+
+                _notifyFailed = secondaryZone.NotifyFailed;
+                _syncFailed = secondaryZone.SyncFailed;
+            }
+            else if (_apexZone is StubZone stubZone)
+            {
+                _type = AuthZoneType.Stub;
+                _expiry = stubZone.Expiry;
+
+                _syncFailed = stubZone.SyncFailed;
+            }
+            else if (_apexZone is ForwarderZone)
+            {
+                _type = AuthZoneType.Forwarder;
+            }
+            else
+            {
+                _type = AuthZoneType.Unknown;
+            }
+
+            _disabled = _apexZone.Disabled;
+            _zoneTransfer = _apexZone.ZoneTransfer;
+            _zoneTransferNameServers = _apexZone.ZoneTransferNameServers;
+            _notify = _apexZone.Notify;
+            _notifyNameServers = _apexZone.NotifyNameServers;
+            _update = _apexZone.Update;
+            _updateIpAddresses = _apexZone.UpdateIpAddresses;
         }
 
         #endregion
@@ -120,21 +342,25 @@ namespace DnsServerCore.Dns.Zones
 
         public IReadOnlyList<DnsResourceRecord> GetRecords(DnsResourceRecordType type)
         {
-            if (_zone == null)
+            if (_apexZone is null)
                 throw new InvalidOperationException();
 
-            return _zone.GetRecords(type);
+            return _apexZone.GetRecords(type);
         }
 
-        public void NotifyNameServers()
+        public void TriggerNotify()
         {
-            if (_zone == null)
+            if (_apexZone is null)
                 throw new InvalidOperationException();
 
             switch (_type)
             {
                 case AuthZoneType.Primary:
-                    (_zone as PrimaryZone).NotifyNameServers();
+                    (_apexZone as PrimaryZone).TriggerNotify();
+                    break;
+
+                case AuthZoneType.Secondary:
+                    (_apexZone as SecondaryZone).TriggerNotify();
                     break;
 
                 default:
@@ -142,19 +368,39 @@ namespace DnsServerCore.Dns.Zones
             }
         }
 
-        public void RefreshZone()
+        public void TriggerRefresh()
         {
-            if (_zone == null)
+            if (_apexZone is null)
                 throw new InvalidOperationException();
 
             switch (_type)
             {
                 case AuthZoneType.Secondary:
-                    (_zone as SecondaryZone).RefreshZone();
+                    (_apexZone as SecondaryZone).TriggerRefresh();
                     break;
 
                 case AuthZoneType.Stub:
-                    (_zone as StubZone).RefreshZone();
+                    (_apexZone as StubZone).TriggerRefresh();
+                    break;
+
+                default:
+                    throw new InvalidOperationException();
+            }
+        }
+
+        public void TriggerResync()
+        {
+            if (_apexZone is null)
+                throw new InvalidOperationException();
+
+            switch (_type)
+            {
+                case AuthZoneType.Secondary:
+                    (_apexZone as SecondaryZone).TriggerResync();
+                    break;
+
+                case AuthZoneType.Stub:
+                    (_apexZone as StubZone).TriggerResync();
                     break;
 
                 default:
@@ -164,35 +410,174 @@ namespace DnsServerCore.Dns.Zones
 
         public Task<IReadOnlyList<NameServerAddress>> GetPrimaryNameServerAddressesAsync(DnsServer dnsServer)
         {
-            if (_zone == null)
+            if (_apexZone is null)
                 throw new InvalidOperationException();
 
-            return _zone.GetPrimaryNameServerAddressesAsync(dnsServer);
+            return _apexZone.GetPrimaryNameServerAddressesAsync(dnsServer);
         }
 
         public Task<IReadOnlyList<NameServerAddress>> GetSecondaryNameServerAddressesAsync(DnsServer dnsServer)
         {
-            if (_zone == null)
+            if (_apexZone is null)
                 throw new InvalidOperationException();
 
-            return _zone.GetSecondaryNameServerAddressesAsync(dnsServer);
+            return _apexZone.GetSecondaryNameServerAddressesAsync(dnsServer);
         }
 
         public void WriteTo(BinaryWriter bW)
         {
-            if (_zone == null)
+            if (_apexZone is null)
                 throw new InvalidOperationException();
 
-            bW.Write((byte)1); //version
+            bW.Write((byte)6); //version
 
             bW.WriteShortString(_name);
             bW.Write((byte)_type);
             bW.Write(_disabled);
+            bW.Write((byte)_zoneTransfer);
+
+            if (_zoneTransferNameServers is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_zoneTransferNameServers.Count));
+                foreach (IPAddress nameServer in _zoneTransferNameServers)
+                    nameServer.WriteTo(bW);
+            }
+
+            bW.Write((byte)_notify);
+
+            if (_notifyNameServers is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_notifyNameServers.Count));
+                foreach (IPAddress nameServer in _notifyNameServers)
+                    nameServer.WriteTo(bW);
+            }
+
+            bW.Write((byte)_update);
+
+            if (_updateIpAddresses is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_updateIpAddresses.Count));
+                foreach (IPAddress ipAddress in _updateIpAddresses)
+                    ipAddress.WriteTo(bW);
+            }
 
             switch (_type)
             {
+                case AuthZoneType.Primary:
+                    if (_zoneHistory is null)
+                    {
+                        bW.Write(0);
+                    }
+                    else
+                    {
+                        bW.Write(_zoneHistory.Count);
+
+                        foreach (DnsResourceRecord record in _zoneHistory)
+                        {
+                            record.WriteTo(bW.BaseStream);
+
+                            if (record.Tag is not DnsResourceRecordInfo rrInfo)
+                                rrInfo = new DnsResourceRecordInfo(); //default info
+
+                            rrInfo.WriteTo(bW);
+                        }
+                    }
+
+                    if (_zoneTransferTsigKeyNames is null)
+                    {
+                        bW.Write((byte)0);
+                    }
+                    else
+                    {
+                        bW.Write(Convert.ToByte(_zoneTransferTsigKeyNames.Count));
+
+                        foreach (KeyValuePair<string, object> tsigKeyName in _zoneTransferTsigKeyNames)
+                            bW.WriteShortString(tsigKeyName.Key);
+                    }
+
+                    if (_updateTsigKeyNames is null)
+                    {
+                        bW.Write((byte)0);
+                    }
+                    else
+                    {
+                        bW.Write(Convert.ToByte(_updateTsigKeyNames.Count));
+
+                        foreach (KeyValuePair<string, object> tsigKeyName in _updateTsigKeyNames)
+                            bW.WriteShortString(tsigKeyName.Key);
+                    }
+
+                    if (_dnssecPrivateKeys is null)
+                    {
+                        bW.Write((byte)0);
+                    }
+                    else
+                    {
+                        bW.Write(Convert.ToByte(_dnssecPrivateKeys.Count));
+
+                        foreach (DnssecPrivateKey dnssecPrivateKey in _dnssecPrivateKeys)
+                            dnssecPrivateKey.WriteTo(bW);
+                    }
+                    break;
+
                 case AuthZoneType.Secondary:
                     bW.Write(_expiry);
+
+                    if (_zoneHistory is null)
+                    {
+                        bW.Write(0);
+                    }
+                    else
+                    {
+                        bW.Write(_zoneHistory.Count);
+
+                        foreach (DnsResourceRecord record in _zoneHistory)
+                        {
+                            record.WriteTo(bW.BaseStream);
+
+                            if (record.Tag is not DnsResourceRecordInfo rrInfo)
+                                rrInfo = new DnsResourceRecordInfo(); //default info
+
+                            rrInfo.WriteTo(bW);
+                        }
+                    }
+
+                    if (_zoneTransferTsigKeyNames is null)
+                    {
+                        bW.Write((byte)0);
+                    }
+                    else
+                    {
+                        bW.Write(Convert.ToByte(_zoneTransferTsigKeyNames.Count));
+
+                        foreach (KeyValuePair<string, object> tsigKeyName in _zoneTransferTsigKeyNames)
+                            bW.WriteShortString(tsigKeyName.Key);
+                    }
+
+                    if (_updateTsigKeyNames is null)
+                    {
+                        bW.Write((byte)0);
+                    }
+                    else
+                    {
+                        bW.Write(Convert.ToByte(_updateTsigKeyNames.Count));
+
+                        foreach (KeyValuePair<string, object> tsigKeyName in _updateTsigKeyNames)
+                            bW.WriteShortString(tsigKeyName.Key);
+                    }
+
                     break;
 
                 case AuthZoneType.Stub:
@@ -215,6 +600,9 @@ namespace DnsServerCore.Dns.Zones
 
         #region properties
 
+        internal ApexZone ApexZone
+        { get { return _apexZone; } }
+
         public string Name
         { get { return _name; } }
 
@@ -226,10 +614,82 @@ namespace DnsServerCore.Dns.Zones
             get { return _disabled; }
             set
             {
-                if (_zone == null)
+                if (_apexZone is null)
                     throw new InvalidOperationException();
 
-                _zone.Disabled = value;
+                _apexZone.Disabled = value;
+            }
+        }
+
+        public AuthZoneTransfer ZoneTransfer
+        {
+            get { return _zoneTransfer; }
+            set
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                _apexZone.ZoneTransfer = value;
+            }
+        }
+
+        public IReadOnlyCollection<IPAddress> ZoneTransferNameServers
+        {
+            get { return _zoneTransferNameServers; }
+            set
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                _apexZone.ZoneTransferNameServers = value;
+            }
+        }
+
+        public AuthZoneNotify Notify
+        {
+            get { return _notify; }
+            set
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                _apexZone.Notify = value;
+            }
+        }
+
+        public IReadOnlyCollection<IPAddress> NotifyNameServers
+        {
+            get { return _notifyNameServers; }
+            set
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                _apexZone.NotifyNameServers = value;
+            }
+        }
+
+        public AuthZoneUpdate Update
+        {
+            get { return _update; }
+            set
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                _apexZone.Update = value;
+            }
+        }
+
+        public IReadOnlyCollection<IPAddress> UpdateIpAddresses
+        {
+            get { return _updateIpAddresses; }
+            set
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                _apexZone.UpdateIpAddresses = value;
             }
         }
 
@@ -240,16 +700,20 @@ namespace DnsServerCore.Dns.Zones
         {
             get
             {
-                if (_zone == null)
+                if (_apexZone is null)
                     throw new InvalidOperationException();
 
-                if (_zone is SecondaryZone secondaryZone)
-                    return secondaryZone.IsExpired;
+                switch (_type)
+                {
+                    case AuthZoneType.Secondary:
+                        return (_apexZone as SecondaryZone).IsExpired;
 
-                if (_zone is StubZone stubZone)
-                    return stubZone.IsExpired;
+                    case AuthZoneType.Stub:
+                        return (_apexZone as StubZone).IsExpired;
 
-                return false;
+                    default:
+                        return false;
+                }
             }
         }
 
@@ -257,15 +721,102 @@ namespace DnsServerCore.Dns.Zones
         {
             get
             {
-                if (_zone == null)
+                if (_apexZone is null)
                     throw new InvalidOperationException();
 
-                if (_zone is PrimaryZone primaryZone)
-                    return primaryZone.Internal;
+                switch (_type)
+                {
+                    case AuthZoneType.Primary:
+                        return (_apexZone as PrimaryZone).Internal;
 
-                return false;
+                    default:
+                        return false;
+                }
             }
         }
+
+        public IReadOnlyList<DnsResourceRecord> ZoneHistory
+        { get { return _zoneHistory; } }
+
+        public IReadOnlyDictionary<string, object> ZoneTransferTsigKeyNames
+        {
+            get { return _zoneTransferTsigKeyNames; }
+            set
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                switch (_type)
+                {
+                    case AuthZoneType.Primary:
+                    case AuthZoneType.Secondary:
+                        _apexZone.ZoneTransferTsigKeyNames = value;
+                        break;
+
+                    default:
+                        throw new InvalidOperationException();
+                }
+            }
+        }
+
+        public IReadOnlyDictionary<string, object> UpdateTsigKeyNames
+        {
+            get { return _updateTsigKeyNames; }
+            set
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                switch (_type)
+                {
+                    case AuthZoneType.Primary:
+                    case AuthZoneType.Secondary:
+                        _apexZone.UpdateTsigKeyNames = value;
+                        break;
+
+                    default:
+                        throw new InvalidOperationException();
+                }
+            }
+        }
+
+        public AuthZoneDnssecStatus DnssecStatus
+        {
+            get
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                return _apexZone.DnssecStatus;
+            }
+        }
+
+        public uint DnsKeyTtl
+        {
+            get
+            {
+                if (_apexZone is null)
+                    throw new InvalidOperationException();
+
+                switch (_type)
+                {
+                    case AuthZoneType.Primary:
+                        return (_apexZone as PrimaryZone).GetDnsKeyTtl();
+
+                    default:
+                        throw new NotSupportedException();
+                }
+            }
+        }
+
+        public IReadOnlyCollection<DnssecPrivateKey> DnssecPrivateKeys
+        { get { return _dnssecPrivateKeys; } }
+
+        public bool NotifyFailed
+        { get { return _notifyFailed; } }
+
+        public bool SyncFailed
+        { get { return _syncFailed; } }
 
         #endregion
     }

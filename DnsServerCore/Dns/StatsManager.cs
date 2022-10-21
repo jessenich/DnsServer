@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,36 +17,23 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.ApplicationCommon;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Dns
 {
-    public enum StatsResponseCode
-    {
-        NoError = 1,
-        ServerFailure = 2,
-        NxDomain = 3,
-        Refused = 4
-    }
-
-    public enum StatsResponseType
-    {
-        Authoritative = 1,
-        Recursive = 2,
-        Cached = 3,
-        Blocked = 4
-    }
-
     public enum TopStatsType
     {
         Unknown = 0,
@@ -55,7 +42,7 @@ namespace DnsServerCore.Dns
         TopBlockedDomains = 3
     }
 
-    public class StatsManager : IDisposable
+    public sealed class StatsManager : IDisposable
     {
         #region variables
 
@@ -71,7 +58,7 @@ namespace DnsServerCore.Dns
 
         readonly Timer _maintenanceTimer;
         const int MAINTENANCE_TIMER_INITIAL_INTERVAL = 10000;
-        const int MAINTENANCE_TIMER_INTERVAL = 10000;
+        const int MAINTENANCE_TIMER_PERIODIC_INTERVAL = 10000;
 
         readonly BlockingCollection<StatsQueueItem> _queue = new BlockingCollection<StatsQueueItem>();
         readonly Thread _consumerThread;
@@ -109,10 +96,10 @@ namespace DnsServerCore.Dns
                 catch (Exception ex)
                 {
                     LogManager log = dnsServer.LogManager;
-                    if (log != null)
+                    if (log is not null)
                         log.Write(ex);
                 }
-            }, null, MAINTENANCE_TIMER_INITIAL_INTERVAL, MAINTENANCE_TIMER_INTERVAL);
+            }, null, MAINTENANCE_TIMER_INITIAL_INTERVAL, MAINTENANCE_TIMER_PERIODIC_INTERVAL);
 
             //stats consumer thread
             _consumerThread = new Thread(delegate ()
@@ -121,15 +108,45 @@ namespace DnsServerCore.Dns
                 {
                     foreach (StatsQueueItem item in _queue.GetConsumingEnumerable())
                     {
-                        StatCounter statCounter = _lastHourStatCounters[item._dateTime.Minute];
-                        if (statCounter != null)
-                            statCounter.Update(item._query, item._responseCode, item._responseType, item._clientIpAddress);
+                        StatCounter statCounter = _lastHourStatCounters[item._timestamp.Minute];
+                        if (statCounter is not null)
+                        {
+                            DnsQuestionRecord query;
+
+                            if (item._request.Question.Count > 0)
+                                query = item._request.Question[0];
+                            else
+                                query = null;
+
+                            DnsServerResponseType responseType;
+
+                            if (item._response.Tag is null)
+                                responseType = DnsServerResponseType.Recursive;
+                            else
+                                responseType = (DnsServerResponseType)item._response.Tag;
+
+                            statCounter.Update(query, item._response.RCODE, responseType, item._remoteEP.Address);
+                        }
+
+                        foreach (IDnsQueryLogger logger in _dnsServer.DnsApplicationManager.DnsQueryLoggers)
+                        {
+                            try
+                            {
+                                _ = logger.InsertLogAsync(item._timestamp, item._request, item._remoteEP, item._protocol, item._response);
+                            }
+                            catch (Exception ex)
+                            {
+                                LogManager log = dnsServer.LogManager;
+                                if (log is not null)
+                                    log.Write(ex);
+                            }
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
                     LogManager log = dnsServer.LogManager;
-                    if (log != null)
+                    if (log is not null)
                         log.Write(ex);
                 }
             });
@@ -207,7 +224,7 @@ namespace DnsServerCore.Dns
                 catch (Exception ex)
                 {
                     LogManager log = dnsServer.LogManager;
-                    if (log != null)
+                    if (log is not null)
                         log.Write(ex);
                 }
             });
@@ -219,10 +236,10 @@ namespace DnsServerCore.Dns
 
         #region IDisposable
 
-        private bool _disposed = false;
-        private readonly object _disposeLock = new object();
+        bool _disposed;
+        readonly object _disposeLock = new object();
 
-        protected virtual void Dispose(bool disposing)
+        private void Dispose(bool disposing)
         {
             lock (_disposeLock)
             {
@@ -331,6 +348,18 @@ namespace DnsServerCore.Dns
 
                 foreach (DateTime key in _keysToRemove)
                     _hourlyStatsCache.TryRemove(key, out _);
+            }
+
+            //unload minute stats data from hourly stats cache for data older than last hour
+            {
+                DateTime lastHourThreshold = DateTime.UtcNow.AddHours(-1);
+                lastHourThreshold = new DateTime(lastHourThreshold.Year, lastHourThreshold.Month, lastHourThreshold.Day, lastHourThreshold.Hour, 0, 0, DateTimeKind.Utc);
+
+                foreach (KeyValuePair<DateTime, HourlyStats> item in _hourlyStatsCache)
+                {
+                    if (item.Key < lastHourThreshold)
+                        item.Value.UnloadMinuteStats();
+                }
             }
 
             //remove old data from daily stats cache
@@ -522,66 +551,28 @@ namespace DnsServerCore.Dns
             Flush();
         }
 
-        public void Update(DnsDatagram response, IPAddress clientIpAddress)
+        public void QueueUpdate(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, DnsDatagram response)
         {
-            StatsResponseCode responseCode;
-
-            switch (response.RCODE)
-            {
-                case DnsResponseCode.NoError:
-                    responseCode = StatsResponseCode.NoError;
-                    break;
-
-                case DnsResponseCode.ServerFailure:
-                    responseCode = StatsResponseCode.ServerFailure;
-                    break;
-
-                case DnsResponseCode.NxDomain:
-                    responseCode = StatsResponseCode.NxDomain;
-                    break;
-
-                case DnsResponseCode.Refused:
-                    responseCode = StatsResponseCode.Refused;
-                    break;
-
-                default:
-                    return;
-            }
-
-            StatsResponseType responseType;
-
-            if (response.Tag == null)
-                responseType = StatsResponseType.Recursive;
-            else
-                responseType = (StatsResponseType)response.Tag;
-
-            StatsQueueItem item;
-
-            if (response.QDCOUNT > 0)
-                item = new StatsQueueItem(response.Question[0], responseCode, responseType, clientIpAddress);
-            else
-                item = new StatsQueueItem(new DnsQuestionRecord("", DnsResourceRecordType.ANY, DnsClass.IN), responseCode, responseType, clientIpAddress);
-
-            _queue.Add(item);
+            _queue.Add(new StatsQueueItem(request, remoteEP, protocol, response));
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetLastHourMinuteWiseStats()
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetLastHourMinuteWiseStats(bool utcFormat)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
 
-            List<KeyValuePair<string, int>> totalQueriesPerInterval = new List<KeyValuePair<string, int>>(60);
-            List<KeyValuePair<string, int>> totalNoErrorPerInterval = new List<KeyValuePair<string, int>>(60);
-            List<KeyValuePair<string, int>> totalServerFailurePerInterval = new List<KeyValuePair<string, int>>(60);
-            List<KeyValuePair<string, int>> totalNxDomainPerInterval = new List<KeyValuePair<string, int>>(60);
-            List<KeyValuePair<string, int>> totalRefusedPerInterval = new List<KeyValuePair<string, int>>(60);
+            List<KeyValuePair<string, long>> totalQueriesPerInterval = new List<KeyValuePair<string, long>>(60);
+            List<KeyValuePair<string, long>> totalNoErrorPerInterval = new List<KeyValuePair<string, long>>(60);
+            List<KeyValuePair<string, long>> totalServerFailurePerInterval = new List<KeyValuePair<string, long>>(60);
+            List<KeyValuePair<string, long>> totalNxDomainPerInterval = new List<KeyValuePair<string, long>>(60);
+            List<KeyValuePair<string, long>> totalRefusedPerInterval = new List<KeyValuePair<string, long>>(60);
 
-            List<KeyValuePair<string, int>> totalAuthHitPerInterval = new List<KeyValuePair<string, int>>(60);
-            List<KeyValuePair<string, int>> totalRecursionsPerInterval = new List<KeyValuePair<string, int>>(60);
-            List<KeyValuePair<string, int>> totalCacheHitPerInterval = new List<KeyValuePair<string, int>>(60);
-            List<KeyValuePair<string, int>> totalBlockedPerInterval = new List<KeyValuePair<string, int>>(60);
+            List<KeyValuePair<string, long>> totalAuthHitPerInterval = new List<KeyValuePair<string, long>>(60);
+            List<KeyValuePair<string, long>> totalRecursionsPerInterval = new List<KeyValuePair<string, long>>(60);
+            List<KeyValuePair<string, long>> totalCacheHitPerInterval = new List<KeyValuePair<string, long>>(60);
+            List<KeyValuePair<string, long>> totalBlockedPerInterval = new List<KeyValuePair<string, long>>(60);
 
-            List<KeyValuePair<string, int>> totalClientsPerInterval = new List<KeyValuePair<string, int>>(60);
+            List<KeyValuePair<string, long>> totalClientsPerInterval = new List<KeyValuePair<string, long>>(60);
 
             DateTime lastHourDateTime = DateTime.UtcNow.AddMinutes(-60);
             lastHourDateTime = new DateTime(lastHourDateTime.Year, lastHourDateTime.Month, lastHourDateTime.Day, lastHourDateTime.Hour, lastHourDateTime.Minute, 0, DateTimeKind.Utc);
@@ -589,60 +580,65 @@ namespace DnsServerCore.Dns
             for (int minute = 0; minute < 60; minute++)
             {
                 DateTime lastDateTime = lastHourDateTime.AddMinutes(minute);
-                string label = lastDateTime.ToLocalTime().ToString("HH:mm");
+                string label;
+
+                if (utcFormat)
+                    label = lastDateTime.AddMinutes(1).ToString("O");
+                else
+                    label = lastDateTime.AddMinutes(1).ToLocalTime().ToString("HH:mm");
 
                 StatCounter statCounter = _lastHourStatCountersCopy[lastDateTime.Minute];
                 if ((statCounter != null) && statCounter.IsLocked)
                 {
                     totalStatCounter.Merge(statCounter);
 
-                    totalQueriesPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalQueries));
-                    totalNoErrorPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalNoError));
-                    totalServerFailurePerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalServerFailure));
-                    totalNxDomainPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalNxDomain));
-                    totalRefusedPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalRefused));
+                    totalQueriesPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalQueries));
+                    totalNoErrorPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalNoError));
+                    totalServerFailurePerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalServerFailure));
+                    totalNxDomainPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalNxDomain));
+                    totalRefusedPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalRefused));
 
-                    totalAuthHitPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalAuthoritative));
-                    totalRecursionsPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalRecursive));
-                    totalCacheHitPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalCached));
-                    totalBlockedPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalBlocked));
+                    totalAuthHitPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalAuthoritative));
+                    totalRecursionsPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalRecursive));
+                    totalCacheHitPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalCached));
+                    totalBlockedPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalBlocked));
 
-                    totalClientsPerInterval.Add(new KeyValuePair<string, int>(label, statCounter.TotalClients));
+                    totalClientsPerInterval.Add(new KeyValuePair<string, long>(label, statCounter.TotalClients));
                 }
                 else
                 {
-                    totalQueriesPerInterval.Add(new KeyValuePair<string, int>(label, 0));
-                    totalNoErrorPerInterval.Add(new KeyValuePair<string, int>(label, 0));
-                    totalServerFailurePerInterval.Add(new KeyValuePair<string, int>(label, 0));
-                    totalNxDomainPerInterval.Add(new KeyValuePair<string, int>(label, 0));
-                    totalRefusedPerInterval.Add(new KeyValuePair<string, int>(label, 0));
+                    totalQueriesPerInterval.Add(new KeyValuePair<string, long>(label, 0));
+                    totalNoErrorPerInterval.Add(new KeyValuePair<string, long>(label, 0));
+                    totalServerFailurePerInterval.Add(new KeyValuePair<string, long>(label, 0));
+                    totalNxDomainPerInterval.Add(new KeyValuePair<string, long>(label, 0));
+                    totalRefusedPerInterval.Add(new KeyValuePair<string, long>(label, 0));
 
-                    totalAuthHitPerInterval.Add(new KeyValuePair<string, int>(label, 0));
-                    totalRecursionsPerInterval.Add(new KeyValuePair<string, int>(label, 0));
-                    totalCacheHitPerInterval.Add(new KeyValuePair<string, int>(label, 0));
-                    totalBlockedPerInterval.Add(new KeyValuePair<string, int>(label, 0));
+                    totalAuthHitPerInterval.Add(new KeyValuePair<string, long>(label, 0));
+                    totalRecursionsPerInterval.Add(new KeyValuePair<string, long>(label, 0));
+                    totalCacheHitPerInterval.Add(new KeyValuePair<string, long>(label, 0));
+                    totalBlockedPerInterval.Add(new KeyValuePair<string, long>(label, 0));
 
-                    totalClientsPerInterval.Add(new KeyValuePair<string, int>(label, 0));
+                    totalClientsPerInterval.Add(new KeyValuePair<string, long>(label, 0));
                 }
             }
 
-            Dictionary<string, List<KeyValuePair<string, int>>> data = new Dictionary<string, List<KeyValuePair<string, int>>>();
+            Dictionary<string, List<KeyValuePair<string, long>>> data = new Dictionary<string, List<KeyValuePair<string, long>>>();
 
             {
-                List<KeyValuePair<string, int>> stats = new List<KeyValuePair<string, int>>(10);
+                List<KeyValuePair<string, long>> stats = new List<KeyValuePair<string, long>>(10);
 
-                stats.Add(new KeyValuePair<string, int>("totalQueries", totalStatCounter.TotalQueries));
-                stats.Add(new KeyValuePair<string, int>("totalNoError", totalStatCounter.TotalNoError));
-                stats.Add(new KeyValuePair<string, int>("totalServerFailure", totalStatCounter.TotalServerFailure));
-                stats.Add(new KeyValuePair<string, int>("totalNxDomain", totalStatCounter.TotalNxDomain));
-                stats.Add(new KeyValuePair<string, int>("totalRefused", totalStatCounter.TotalRefused));
+                stats.Add(new KeyValuePair<string, long>("totalQueries", totalStatCounter.TotalQueries));
+                stats.Add(new KeyValuePair<string, long>("totalNoError", totalStatCounter.TotalNoError));
+                stats.Add(new KeyValuePair<string, long>("totalServerFailure", totalStatCounter.TotalServerFailure));
+                stats.Add(new KeyValuePair<string, long>("totalNxDomain", totalStatCounter.TotalNxDomain));
+                stats.Add(new KeyValuePair<string, long>("totalRefused", totalStatCounter.TotalRefused));
 
-                stats.Add(new KeyValuePair<string, int>("totalAuthoritative", totalStatCounter.TotalAuthoritative));
-                stats.Add(new KeyValuePair<string, int>("totalRecursive", totalStatCounter.TotalRecursive));
-                stats.Add(new KeyValuePair<string, int>("totalCached", totalStatCounter.TotalCached));
-                stats.Add(new KeyValuePair<string, int>("totalBlocked", totalStatCounter.TotalBlocked));
+                stats.Add(new KeyValuePair<string, long>("totalAuthoritative", totalStatCounter.TotalAuthoritative));
+                stats.Add(new KeyValuePair<string, long>("totalRecursive", totalStatCounter.TotalRecursive));
+                stats.Add(new KeyValuePair<string, long>("totalCached", totalStatCounter.TotalCached));
+                stats.Add(new KeyValuePair<string, long>("totalBlocked", totalStatCounter.TotalBlocked));
 
-                stats.Add(new KeyValuePair<string, int>("totalClients", totalStatCounter.TotalClients));
+                stats.Add(new KeyValuePair<string, long>("totalClients", totalStatCounter.TotalClients));
 
                 data.Add("stats", stats);
             }
@@ -668,38 +664,38 @@ namespace DnsServerCore.Dns
             return data;
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetLastDayHourWiseStats()
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetLastDayHourWiseStats(bool utcFormat)
         {
-            return GetHourWiseStats(DateTime.UtcNow.AddHours(-24), 24);
+            return GetHourWiseStats(DateTime.UtcNow.AddHours(-24), 24, utcFormat);
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetLastWeekDayWiseStats()
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetLastWeekDayWiseStats(bool utcFormat)
         {
-            return GetDayWiseStats(DateTime.UtcNow.AddDays(-7).Date, 7);
+            return GetDayWiseStats(DateTime.UtcNow.AddDays(-7).Date, 7, utcFormat);
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetLastMonthDayWiseStats()
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetLastMonthDayWiseStats(bool utcFormat)
         {
-            return GetDayWiseStats(DateTime.UtcNow.AddDays(-31).Date, 31);
+            return GetDayWiseStats(DateTime.UtcNow.AddDays(-31).Date, 31, utcFormat);
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetLastYearMonthWiseStats()
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetLastYearMonthWiseStats(bool utcFormat)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
 
-            List<KeyValuePair<string, int>> totalQueriesPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalNoErrorPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalServerFailurePerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalNxDomainPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalRefusedPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalQueriesPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalNoErrorPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalServerFailurePerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalNxDomainPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalRefusedPerInterval = new List<KeyValuePair<string, long>>();
 
-            List<KeyValuePair<string, int>> totalAuthHitPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalRecursionsPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalCacheHitPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalBlockedPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalAuthHitPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalRecursionsPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalCacheHitPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalBlockedPerInterval = new List<KeyValuePair<string, long>>();
 
-            List<KeyValuePair<string, int>> totalClientsPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalClientsPerInterval = new List<KeyValuePair<string, long>>();
 
             DateTime lastYearDateTime = DateTime.UtcNow.AddMonths(-12);
             lastYearDateTime = new DateTime(lastYearDateTime.Year, lastYearDateTime.Month, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -710,49 +706,54 @@ namespace DnsServerCore.Dns
                 monthlyStatCounter.Lock();
 
                 DateTime lastMonthDateTime = lastYearDateTime.AddMonths(month);
-                string label = lastMonthDateTime.ToLocalTime().ToString("MM/yyyy");
+                string label;
+
+                if (utcFormat)
+                    label = lastMonthDateTime.ToString("O");
+                else
+                    label = lastMonthDateTime.ToLocalTime().ToString("MM/yyyy");
 
                 int days = DateTime.DaysInMonth(lastMonthDateTime.Year, lastMonthDateTime.Month);
 
                 for (int day = 0; day < days; day++) //days
                 {
                     StatCounter dailyStatCounter = LoadDailyStats(lastMonthDateTime.AddDays(day));
-                    monthlyStatCounter.Merge(dailyStatCounter);
+                    monthlyStatCounter.Merge(dailyStatCounter, true);
                 }
 
-                totalStatCounter.Merge(monthlyStatCounter);
+                totalStatCounter.Merge(monthlyStatCounter, true);
 
-                totalQueriesPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalQueries));
-                totalNoErrorPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalNoError));
-                totalServerFailurePerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalServerFailure));
-                totalNxDomainPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalNxDomain));
-                totalRefusedPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalRefused));
+                totalQueriesPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalQueries));
+                totalNoErrorPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalNoError));
+                totalServerFailurePerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalServerFailure));
+                totalNxDomainPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalNxDomain));
+                totalRefusedPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalRefused));
 
-                totalAuthHitPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalAuthoritative));
-                totalRecursionsPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalRecursive));
-                totalCacheHitPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalCached));
-                totalBlockedPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalBlocked));
+                totalAuthHitPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalAuthoritative));
+                totalRecursionsPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalRecursive));
+                totalCacheHitPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalCached));
+                totalBlockedPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalBlocked));
 
-                totalClientsPerInterval.Add(new KeyValuePair<string, int>(label, monthlyStatCounter.TotalClients));
+                totalClientsPerInterval.Add(new KeyValuePair<string, long>(label, monthlyStatCounter.TotalClients));
             }
 
-            Dictionary<string, List<KeyValuePair<string, int>>> data = new Dictionary<string, List<KeyValuePair<string, int>>>();
+            Dictionary<string, List<KeyValuePair<string, long>>> data = new Dictionary<string, List<KeyValuePair<string, long>>>();
 
             {
-                List<KeyValuePair<string, int>> stats = new List<KeyValuePair<string, int>>(6);
+                List<KeyValuePair<string, long>> stats = new List<KeyValuePair<string, long>>(6);
 
-                stats.Add(new KeyValuePair<string, int>("totalQueries", totalStatCounter.TotalQueries));
-                stats.Add(new KeyValuePair<string, int>("totalNoError", totalStatCounter.TotalNoError));
-                stats.Add(new KeyValuePair<string, int>("totalServerFailure", totalStatCounter.TotalServerFailure));
-                stats.Add(new KeyValuePair<string, int>("totalNxDomain", totalStatCounter.TotalNxDomain));
-                stats.Add(new KeyValuePair<string, int>("totalRefused", totalStatCounter.TotalRefused));
+                stats.Add(new KeyValuePair<string, long>("totalQueries", totalStatCounter.TotalQueries));
+                stats.Add(new KeyValuePair<string, long>("totalNoError", totalStatCounter.TotalNoError));
+                stats.Add(new KeyValuePair<string, long>("totalServerFailure", totalStatCounter.TotalServerFailure));
+                stats.Add(new KeyValuePair<string, long>("totalNxDomain", totalStatCounter.TotalNxDomain));
+                stats.Add(new KeyValuePair<string, long>("totalRefused", totalStatCounter.TotalRefused));
 
-                stats.Add(new KeyValuePair<string, int>("totalAuthoritative", totalStatCounter.TotalAuthoritative));
-                stats.Add(new KeyValuePair<string, int>("totalRecursive", totalStatCounter.TotalRecursive));
-                stats.Add(new KeyValuePair<string, int>("totalCached", totalStatCounter.TotalCached));
-                stats.Add(new KeyValuePair<string, int>("totalBlocked", totalStatCounter.TotalBlocked));
+                stats.Add(new KeyValuePair<string, long>("totalAuthoritative", totalStatCounter.TotalAuthoritative));
+                stats.Add(new KeyValuePair<string, long>("totalRecursive", totalStatCounter.TotalRecursive));
+                stats.Add(new KeyValuePair<string, long>("totalCached", totalStatCounter.TotalCached));
+                stats.Add(new KeyValuePair<string, long>("totalBlocked", totalStatCounter.TotalBlocked));
 
-                stats.Add(new KeyValuePair<string, int>("totalClients", totalStatCounter.TotalClients));
+                stats.Add(new KeyValuePair<string, long>("totalClients", totalStatCounter.TotalClients));
 
                 data.Add("stats", stats);
             }
@@ -778,74 +779,79 @@ namespace DnsServerCore.Dns
             return data;
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetHourWiseStats(DateTime startDate, DateTime endDate)
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetHourWiseStats(DateTime startDate, DateTime endDate, bool utcFormat)
         {
             int hours = Convert.ToInt32((endDate - startDate).TotalHours) + 1;
             if (hours < 24)
                 hours = 24;
 
-            return GetHourWiseStats(startDate, hours);
+            return GetHourWiseStats(startDate, hours, utcFormat);
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetHourWiseStats(DateTime startDate, int hours)
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetHourWiseStats(DateTime startDate, int hours, bool utcFormat)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
 
-            List<KeyValuePair<string, int>> totalQueriesPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalNoErrorPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalServerFailurePerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalNxDomainPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalRefusedPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalQueriesPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalNoErrorPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalServerFailurePerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalNxDomainPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalRefusedPerInterval = new List<KeyValuePair<string, long>>();
 
-            List<KeyValuePair<string, int>> totalAuthHitPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalRecursionsPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalCacheHitPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalBlockedPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalAuthHitPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalRecursionsPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalCacheHitPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalBlockedPerInterval = new List<KeyValuePair<string, long>>();
 
-            List<KeyValuePair<string, int>> totalClientsPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalClientsPerInterval = new List<KeyValuePair<string, long>>();
 
             for (int hour = 0; hour < hours; hour++)
             {
                 DateTime lastDateTime = startDate.AddHours(hour);
-                string label = lastDateTime.ToLocalTime().ToString("MM/dd HH") + ":00";
+                string label;
+
+                if (utcFormat)
+                    label = lastDateTime.AddHours(1).ToString("O");
+                else
+                    label = lastDateTime.AddHours(1).ToLocalTime().ToString("MM/dd HH") + ":00";
 
                 HourlyStats hourlyStats = LoadHourlyStats(lastDateTime);
                 StatCounter hourlyStatCounter = hourlyStats.HourStat;
 
                 totalStatCounter.Merge(hourlyStatCounter);
 
-                totalQueriesPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalQueries));
-                totalNoErrorPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalNoError));
-                totalServerFailurePerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalServerFailure));
-                totalNxDomainPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalNxDomain));
-                totalRefusedPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalRefused));
+                totalQueriesPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalQueries));
+                totalNoErrorPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalNoError));
+                totalServerFailurePerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalServerFailure));
+                totalNxDomainPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalNxDomain));
+                totalRefusedPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalRefused));
 
-                totalAuthHitPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalAuthoritative));
-                totalRecursionsPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalRecursive));
-                totalCacheHitPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalCached));
-                totalBlockedPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalBlocked));
+                totalAuthHitPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalAuthoritative));
+                totalRecursionsPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalRecursive));
+                totalCacheHitPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalCached));
+                totalBlockedPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalBlocked));
 
-                totalClientsPerInterval.Add(new KeyValuePair<string, int>(label, hourlyStatCounter.TotalClients));
+                totalClientsPerInterval.Add(new KeyValuePair<string, long>(label, hourlyStatCounter.TotalClients));
             }
 
-            Dictionary<string, List<KeyValuePair<string, int>>> data = new Dictionary<string, List<KeyValuePair<string, int>>>();
+            Dictionary<string, List<KeyValuePair<string, long>>> data = new Dictionary<string, List<KeyValuePair<string, long>>>();
 
             {
-                List<KeyValuePair<string, int>> stats = new List<KeyValuePair<string, int>>(6);
+                List<KeyValuePair<string, long>> stats = new List<KeyValuePair<string, long>>(6);
 
-                stats.Add(new KeyValuePair<string, int>("totalQueries", totalStatCounter.TotalQueries));
-                stats.Add(new KeyValuePair<string, int>("totalNoError", totalStatCounter.TotalNoError));
-                stats.Add(new KeyValuePair<string, int>("totalServerFailure", totalStatCounter.TotalServerFailure));
-                stats.Add(new KeyValuePair<string, int>("totalNxDomain", totalStatCounter.TotalNxDomain));
-                stats.Add(new KeyValuePair<string, int>("totalRefused", totalStatCounter.TotalRefused));
+                stats.Add(new KeyValuePair<string, long>("totalQueries", totalStatCounter.TotalQueries));
+                stats.Add(new KeyValuePair<string, long>("totalNoError", totalStatCounter.TotalNoError));
+                stats.Add(new KeyValuePair<string, long>("totalServerFailure", totalStatCounter.TotalServerFailure));
+                stats.Add(new KeyValuePair<string, long>("totalNxDomain", totalStatCounter.TotalNxDomain));
+                stats.Add(new KeyValuePair<string, long>("totalRefused", totalStatCounter.TotalRefused));
 
-                stats.Add(new KeyValuePair<string, int>("totalAuthoritative", totalStatCounter.TotalAuthoritative));
-                stats.Add(new KeyValuePair<string, int>("totalRecursive", totalStatCounter.TotalRecursive));
-                stats.Add(new KeyValuePair<string, int>("totalCached", totalStatCounter.TotalCached));
-                stats.Add(new KeyValuePair<string, int>("totalBlocked", totalStatCounter.TotalBlocked));
+                stats.Add(new KeyValuePair<string, long>("totalAuthoritative", totalStatCounter.TotalAuthoritative));
+                stats.Add(new KeyValuePair<string, long>("totalRecursive", totalStatCounter.TotalRecursive));
+                stats.Add(new KeyValuePair<string, long>("totalCached", totalStatCounter.TotalCached));
+                stats.Add(new KeyValuePair<string, long>("totalBlocked", totalStatCounter.TotalBlocked));
 
-                stats.Add(new KeyValuePair<string, int>("totalClients", totalStatCounter.TotalClients));
+                stats.Add(new KeyValuePair<string, long>("totalClients", totalStatCounter.TotalClients));
 
                 data.Add("stats", stats);
             }
@@ -871,68 +877,73 @@ namespace DnsServerCore.Dns
             return data;
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetDayWiseStats(DateTime startDate, DateTime endDate)
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetDayWiseStats(DateTime startDate, DateTime endDate, bool utcFormat)
         {
-            return GetDayWiseStats(startDate, Convert.ToInt32((endDate - startDate).TotalDays) + 1);
+            return GetDayWiseStats(startDate, Convert.ToInt32((endDate - startDate).TotalDays) + 1, utcFormat);
         }
 
-        public Dictionary<string, List<KeyValuePair<string, int>>> GetDayWiseStats(DateTime startDate, int days)
+        public Dictionary<string, List<KeyValuePair<string, long>>> GetDayWiseStats(DateTime startDate, int days, bool utcFormat)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
 
-            List<KeyValuePair<string, int>> totalQueriesPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalNoErrorPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalServerFailurePerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalNxDomainPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalRefusedPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalQueriesPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalNoErrorPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalServerFailurePerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalNxDomainPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalRefusedPerInterval = new List<KeyValuePair<string, long>>();
 
-            List<KeyValuePair<string, int>> totalAuthHitPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalRecursionsPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalCacheHitPerInterval = new List<KeyValuePair<string, int>>();
-            List<KeyValuePair<string, int>> totalBlockedPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalAuthHitPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalRecursionsPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalCacheHitPerInterval = new List<KeyValuePair<string, long>>();
+            List<KeyValuePair<string, long>> totalBlockedPerInterval = new List<KeyValuePair<string, long>>();
 
-            List<KeyValuePair<string, int>> totalClientsPerInterval = new List<KeyValuePair<string, int>>();
+            List<KeyValuePair<string, long>> totalClientsPerInterval = new List<KeyValuePair<string, long>>();
 
             for (int day = 0; day < days; day++) //days
             {
                 DateTime lastDayDateTime = startDate.AddDays(day);
-                string label = lastDayDateTime.ToLocalTime().ToString("MM/dd");
+                string label;
+
+                if (utcFormat)
+                    label = lastDayDateTime.ToString("O");
+                else
+                    label = lastDayDateTime.ToLocalTime().ToString("MM/dd");
 
                 StatCounter dailyStatCounter = LoadDailyStats(lastDayDateTime);
-                totalStatCounter.Merge(dailyStatCounter);
+                totalStatCounter.Merge(dailyStatCounter, true);
 
-                totalQueriesPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalQueries));
-                totalNoErrorPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalNoError));
-                totalServerFailurePerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalServerFailure));
-                totalNxDomainPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalNxDomain));
-                totalRefusedPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalRefused));
+                totalQueriesPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalQueries));
+                totalNoErrorPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalNoError));
+                totalServerFailurePerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalServerFailure));
+                totalNxDomainPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalNxDomain));
+                totalRefusedPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalRefused));
 
-                totalAuthHitPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalAuthoritative));
-                totalRecursionsPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalRecursive));
-                totalCacheHitPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalCached));
-                totalBlockedPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalBlocked));
+                totalAuthHitPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalAuthoritative));
+                totalRecursionsPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalRecursive));
+                totalCacheHitPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalCached));
+                totalBlockedPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalBlocked));
 
-                totalClientsPerInterval.Add(new KeyValuePair<string, int>(label, dailyStatCounter.TotalClients));
+                totalClientsPerInterval.Add(new KeyValuePair<string, long>(label, dailyStatCounter.TotalClients));
             }
 
-            Dictionary<string, List<KeyValuePair<string, int>>> data = new Dictionary<string, List<KeyValuePair<string, int>>>();
+            Dictionary<string, List<KeyValuePair<string, long>>> data = new Dictionary<string, List<KeyValuePair<string, long>>>();
 
             {
-                List<KeyValuePair<string, int>> stats = new List<KeyValuePair<string, int>>(6);
+                List<KeyValuePair<string, long>> stats = new List<KeyValuePair<string, long>>(6);
 
-                stats.Add(new KeyValuePair<string, int>("totalQueries", totalStatCounter.TotalQueries));
-                stats.Add(new KeyValuePair<string, int>("totalNoError", totalStatCounter.TotalNoError));
-                stats.Add(new KeyValuePair<string, int>("totalServerFailure", totalStatCounter.TotalServerFailure));
-                stats.Add(new KeyValuePair<string, int>("totalNxDomain", totalStatCounter.TotalNxDomain));
-                stats.Add(new KeyValuePair<string, int>("totalRefused", totalStatCounter.TotalRefused));
+                stats.Add(new KeyValuePair<string, long>("totalQueries", totalStatCounter.TotalQueries));
+                stats.Add(new KeyValuePair<string, long>("totalNoError", totalStatCounter.TotalNoError));
+                stats.Add(new KeyValuePair<string, long>("totalServerFailure", totalStatCounter.TotalServerFailure));
+                stats.Add(new KeyValuePair<string, long>("totalNxDomain", totalStatCounter.TotalNxDomain));
+                stats.Add(new KeyValuePair<string, long>("totalRefused", totalStatCounter.TotalRefused));
 
-                stats.Add(new KeyValuePair<string, int>("totalAuthoritative", totalStatCounter.TotalAuthoritative));
-                stats.Add(new KeyValuePair<string, int>("totalRecursive", totalStatCounter.TotalRecursive));
-                stats.Add(new KeyValuePair<string, int>("totalCached", totalStatCounter.TotalCached));
-                stats.Add(new KeyValuePair<string, int>("totalBlocked", totalStatCounter.TotalBlocked));
+                stats.Add(new KeyValuePair<string, long>("totalAuthoritative", totalStatCounter.TotalAuthoritative));
+                stats.Add(new KeyValuePair<string, long>("totalRecursive", totalStatCounter.TotalRecursive));
+                stats.Add(new KeyValuePair<string, long>("totalCached", totalStatCounter.TotalCached));
+                stats.Add(new KeyValuePair<string, long>("totalBlocked", totalStatCounter.TotalBlocked));
 
-                stats.Add(new KeyValuePair<string, int>("totalClients", totalStatCounter.TotalClients));
+                stats.Add(new KeyValuePair<string, long>("totalClients", totalStatCounter.TotalClients));
 
                 data.Add("stats", stats);
             }
@@ -958,7 +969,7 @@ namespace DnsServerCore.Dns
             return data;
         }
 
-        public List<KeyValuePair<string, int>> GetLastHourTopStats(TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetLastHourTopStats(TopStatsType type, int limit)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
@@ -991,22 +1002,22 @@ namespace DnsServerCore.Dns
             }
         }
 
-        public List<KeyValuePair<string, int>> GetLastDayTopStats(TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetLastDayTopStats(TopStatsType type, int limit)
         {
             return GetHourWiseTopStats(DateTime.UtcNow.AddHours(-24), 24, type, limit);
         }
 
-        public List<KeyValuePair<string, int>> GetLastWeekTopStats(TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetLastWeekTopStats(TopStatsType type, int limit)
         {
             return GetDayWiseTopStats(DateTime.UtcNow.AddDays(-7).Date, 7, type, limit);
         }
 
-        public List<KeyValuePair<string, int>> GetLastMonthTopStats(TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetLastMonthTopStats(TopStatsType type, int limit)
         {
             return GetDayWiseTopStats(DateTime.UtcNow.AddDays(-31).Date, 31, type, limit);
         }
 
-        public List<KeyValuePair<string, int>> GetLastYearTopStats(TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetLastYearTopStats(TopStatsType type, int limit)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
@@ -1026,10 +1037,10 @@ namespace DnsServerCore.Dns
                 for (int day = 0; day < days; day++) //days
                 {
                     StatCounter dailyStatCounter = LoadDailyStats(lastMonthDateTime.AddDays(day));
-                    monthlyStatCounter.Merge(dailyStatCounter);
+                    monthlyStatCounter.Merge(dailyStatCounter, true);
                 }
 
-                totalStatCounter.Merge(monthlyStatCounter);
+                totalStatCounter.Merge(monthlyStatCounter, true);
             }
 
             switch (type)
@@ -1048,7 +1059,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        public List<KeyValuePair<string, int>> GetHourWiseTopStats(DateTime startDate, DateTime endDate, TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetHourWiseTopStats(DateTime startDate, DateTime endDate, TopStatsType type, int limit)
         {
             int hours = Convert.ToInt32((endDate - startDate).TotalHours) + 1;
             if (hours < 24)
@@ -1057,7 +1068,7 @@ namespace DnsServerCore.Dns
             return GetHourWiseTopStats(startDate, hours, type, limit);
         }
 
-        public List<KeyValuePair<string, int>> GetHourWiseTopStats(DateTime startDate, int hours, TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetHourWiseTopStats(DateTime startDate, int hours, TopStatsType type, int limit)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
@@ -1088,12 +1099,12 @@ namespace DnsServerCore.Dns
             }
         }
 
-        public List<KeyValuePair<string, int>> GetDayWiseTopStats(DateTime startDate, DateTime endDate, TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetDayWiseTopStats(DateTime startDate, DateTime endDate, TopStatsType type, int limit)
         {
             return GetDayWiseTopStats(startDate, Convert.ToInt32((endDate - startDate).TotalDays) + 1, type, limit);
         }
 
-        public List<KeyValuePair<string, int>> GetDayWiseTopStats(DateTime startDate, int days, TopStatsType type, int limit)
+        public List<KeyValuePair<string, long>> GetDayWiseTopStats(DateTime startDate, int days, TopStatsType type, int limit)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
@@ -1103,7 +1114,7 @@ namespace DnsServerCore.Dns
                 DateTime lastDayDateTime = startDate.AddDays(day);
 
                 StatCounter dailyStatCounter = LoadDailyStats(lastDayDateTime);
-                totalStatCounter.Merge(dailyStatCounter);
+                totalStatCounter.Merge(dailyStatCounter, true);
             }
 
             switch (type)
@@ -1122,7 +1133,7 @@ namespace DnsServerCore.Dns
             }
         }
 
-        public List<KeyValuePair<DnsQuestionRecord, int>> GetLastHourEligibleQueries(int minimumHitsPerHour)
+        public List<KeyValuePair<DnsQuestionRecord, long>> GetLastHourEligibleQueries(int minimumHitsPerHour)
         {
             StatCounter totalStatCounter = new StatCounter();
             totalStatCounter.Lock();
@@ -1142,6 +1153,27 @@ namespace DnsServerCore.Dns
             return totalStatCounter.GetEligibleQueries(minimumHitsPerHour);
         }
 
+        public void GetLatestClientSubnetStats(int minutes, int ipv4PrefixLength, int ipv6PrefixLength, out IReadOnlyDictionary<IPAddress, long> clientSubnetStats, out IReadOnlyDictionary<IPAddress, long> errorClientSubnetStats)
+        {
+            StatCounter totalStatCounter = new StatCounter();
+            totalStatCounter.Lock();
+
+            DateTime lastHourDateTime = DateTime.UtcNow.AddMinutes(1 - minutes);
+            lastHourDateTime = new DateTime(lastHourDateTime.Year, lastHourDateTime.Month, lastHourDateTime.Day, lastHourDateTime.Hour, lastHourDateTime.Minute, 0, DateTimeKind.Utc);
+
+            for (int minute = 0; minute < minutes; minute++)
+            {
+                DateTime lastDateTime = lastHourDateTime.AddMinutes(minute);
+
+                StatCounter statCounter = _lastHourStatCounters[lastDateTime.Minute];
+                if (statCounter is not null)
+                    totalStatCounter.Merge(statCounter, false, true);
+            }
+
+            clientSubnetStats = totalStatCounter.GetClientSubnetStats(ipv4PrefixLength, ipv6PrefixLength);
+            errorClientSubnetStats = totalStatCounter.GetErrorClientSubnetStats(ipv4PrefixLength, ipv6PrefixLength);
+        }
+
         #endregion
 
         #region properties
@@ -1159,7 +1191,7 @@ namespace DnsServerCore.Dns
             #region variables
 
             readonly StatCounter _hourStat; //calculated value
-            readonly StatCounter[] _minuteStats = new StatCounter[60];
+            StatCounter[] _minuteStats = new StatCounter[60];
 
             #endregion
 
@@ -1209,6 +1241,11 @@ namespace DnsServerCore.Dns
                 _minuteStats[dateTime.Minute] = minuteStat;
             }
 
+            public void UnloadMinuteStats()
+            {
+                _minuteStats = null;
+            }
+
             public void WriteTo(BinaryWriter bW)
             {
                 bW.Write(Encoding.ASCII.GetBytes("HS")); //format
@@ -1247,22 +1284,28 @@ namespace DnsServerCore.Dns
 
             volatile bool _locked;
 
-            int _totalQueries;
-            int _totalNoError;
-            int _totalServerFailure;
-            int _totalNxDomain;
-            int _totalRefused;
+            long _totalQueries;
+            long _totalNoError;
+            long _totalServerFailure;
+            long _totalNxDomain;
+            long _totalRefused;
 
-            int _totalAuthoritative;
-            int _totalRecursive;
-            int _totalCached;
-            int _totalBlocked;
+            long _totalAuthoritative;
+            long _totalRecursive;
+            long _totalCached;
+            long _totalBlocked;
+
+            long _totalClients;
 
             readonly ConcurrentDictionary<string, Counter> _queryDomains;
             readonly ConcurrentDictionary<string, Counter> _queryBlockedDomains;
             readonly ConcurrentDictionary<DnsResourceRecordType, Counter> _queryTypes;
-            readonly ConcurrentDictionary<IPAddress, Counter> _clientIpAddresses;
+            readonly ConcurrentDictionary<IPAddress, Counter> _clientIpAddresses; //includes all queries
+            readonly ConcurrentDictionary<IPAddress, Counter> _errorIpAddresses; //includes REFUSED, FORMERR and SERVFAIL
             readonly ConcurrentDictionary<DnsQuestionRecord, Counter> _queries;
+
+            bool _truncationFoundDuringMerge;
+            long _totalClientsDailyStatsSummation;
 
             #endregion
 
@@ -1274,6 +1317,7 @@ namespace DnsServerCore.Dns
                 _queryBlockedDomains = new ConcurrentDictionary<string, Counter>();
                 _queryTypes = new ConcurrentDictionary<DnsResourceRecordType, Counter>();
                 _clientIpAddresses = new ConcurrentDictionary<IPAddress, Counter>();
+                _errorIpAddresses = new ConcurrentDictionary<IPAddress, Counter>();
                 _queries = new ConcurrentDictionary<DnsQuestionRecord, Counter>();
             }
 
@@ -1289,6 +1333,8 @@ namespace DnsServerCore.Dns
                     case 2:
                     case 3:
                     case 4:
+                    case 5:
+                    case 6:
                         _totalQueries = bR.ReadInt32();
                         _totalNoError = bR.ReadInt32();
                         _totalServerFailure = bR.ReadInt32();
@@ -1309,6 +1355,9 @@ namespace DnsServerCore.Dns
                             if (version >= 2)
                                 _totalCached = bR.ReadInt32();
                         }
+
+                        if (version >= 6)
+                            _totalClients = bR.ReadInt32();
 
                         {
                             int count = bR.ReadInt32();
@@ -1339,7 +1388,10 @@ namespace DnsServerCore.Dns
                             _clientIpAddresses = new ConcurrentDictionary<IPAddress, Counter>(1, count);
 
                             for (int i = 0; i < count; i++)
-                                _clientIpAddresses.TryAdd(IPAddressExtension.Parse(bR), new Counter(bR.ReadInt32()));
+                                _clientIpAddresses.TryAdd(IPAddressExtension.ReadFrom(bR), new Counter(bR.ReadInt32()));
+
+                            if (version < 6)
+                                _totalClients = count;
                         }
 
                         if (version >= 4)
@@ -1355,6 +1407,83 @@ namespace DnsServerCore.Dns
                             _queries = new ConcurrentDictionary<DnsQuestionRecord, Counter>(1, 0);
                         }
 
+                        if (version >= 5)
+                        {
+                            int count = bR.ReadInt32();
+                            _errorIpAddresses = new ConcurrentDictionary<IPAddress, Counter>(1, count);
+
+                            for (int i = 0; i < count; i++)
+                                _errorIpAddresses.TryAdd(IPAddressExtension.ReadFrom(bR), new Counter(bR.ReadInt32()));
+                        }
+                        else
+                        {
+                            _errorIpAddresses = new ConcurrentDictionary<IPAddress, Counter>(1, 0);
+                        }
+
+                        break;
+
+                    case 7:
+                        _totalQueries = bR.ReadInt64();
+                        _totalNoError = bR.ReadInt64();
+                        _totalServerFailure = bR.ReadInt64();
+                        _totalNxDomain = bR.ReadInt64();
+                        _totalRefused = bR.ReadInt64();
+
+                        _totalAuthoritative = bR.ReadInt64();
+                        _totalRecursive = bR.ReadInt64();
+                        _totalCached = bR.ReadInt64();
+                        _totalBlocked = bR.ReadInt64();
+
+                        _totalClients = bR.ReadInt64();
+
+                        {
+                            int count = bR.ReadInt32();
+                            _queryDomains = new ConcurrentDictionary<string, Counter>(1, count);
+
+                            for (int i = 0; i < count; i++)
+                                _queryDomains.TryAdd(bR.ReadShortString(), new Counter(bR.ReadInt64()));
+                        }
+
+                        {
+                            int count = bR.ReadInt32();
+                            _queryBlockedDomains = new ConcurrentDictionary<string, Counter>(1, count);
+
+                            for (int i = 0; i < count; i++)
+                                _queryBlockedDomains.TryAdd(bR.ReadShortString(), new Counter(bR.ReadInt64()));
+                        }
+
+                        {
+                            int count = bR.ReadInt32();
+                            _queryTypes = new ConcurrentDictionary<DnsResourceRecordType, Counter>(1, count);
+
+                            for (int i = 0; i < count; i++)
+                                _queryTypes.TryAdd((DnsResourceRecordType)bR.ReadUInt16(), new Counter(bR.ReadInt64()));
+                        }
+
+                        {
+                            int count = bR.ReadInt32();
+                            _clientIpAddresses = new ConcurrentDictionary<IPAddress, Counter>(1, count);
+
+                            for (int i = 0; i < count; i++)
+                                _clientIpAddresses.TryAdd(IPAddressExtension.ReadFrom(bR), new Counter(bR.ReadInt64()));
+                        }
+
+                        {
+                            int count = bR.ReadInt32();
+                            _queries = new ConcurrentDictionary<DnsQuestionRecord, Counter>(1, count);
+
+                            for (int i = 0; i < count; i++)
+                                _queries.TryAdd(new DnsQuestionRecord(bR.BaseStream), new Counter(bR.ReadInt64()));
+                        }
+
+                        {
+                            int count = bR.ReadInt32();
+                            _errorIpAddresses = new ConcurrentDictionary<IPAddress, Counter>(1, count);
+
+                            for (int i = 0; i < count; i++)
+                                _errorIpAddresses.TryAdd(IPAddressExtension.ReadFrom(bR), new Counter(bR.ReadInt64()));
+                        }
+
                         break;
 
                     default:
@@ -1368,9 +1497,9 @@ namespace DnsServerCore.Dns
 
             #region private
 
-            private static List<KeyValuePair<string, int>> GetTopList(List<KeyValuePair<string, int>> list, int limit)
+            private static List<KeyValuePair<string, long>> GetTopList(List<KeyValuePair<string, long>> list, int limit)
             {
-                list.Sort(delegate (KeyValuePair<string, int> item1, KeyValuePair<string, int> item2)
+                list.Sort(delegate (KeyValuePair<string, long> item1, KeyValuePair<string, long> item2)
                 {
                     return item2.Value.CompareTo(item1.Value);
                 });
@@ -1395,7 +1524,7 @@ namespace DnsServerCore.Dns
                 _locked = true;
             }
 
-            public void Update(DnsQuestionRecord query, StatsResponseCode responseCode, StatsResponseType responseType, IPAddress clientIpAddress)
+            public void Update(DnsQuestionRecord query, DnsResponseCode responseCode, DnsServerResponseType responseType, IPAddress clientIpAddress)
             {
                 if (_locked)
                     return;
@@ -1403,62 +1532,71 @@ namespace DnsServerCore.Dns
                 if (clientIpAddress.IsIPv4MappedToIPv6)
                     clientIpAddress = clientIpAddress.MapToIPv4();
 
-                string domain = query.Name.ToLower();
-
                 Interlocked.Increment(ref _totalQueries);
 
                 switch (responseCode)
                 {
-                    case StatsResponseCode.NoError:
-                        if (responseType != StatsResponseType.Blocked) //skip blocked domains
+                    case DnsResponseCode.NoError:
+                        if ((query is not null) && (responseType != DnsServerResponseType.Blocked)) //skip blocked domains
                         {
-                            _queryDomains.GetOrAdd(domain, GetNewCounter).Increment();
+                            _queryDomains.GetOrAdd(query.Name.ToLower(), GetNewCounter).Increment();
                             _queries.GetOrAdd(query, GetNewCounter).Increment();
                         }
 
                         Interlocked.Increment(ref _totalNoError);
                         break;
 
-                    case StatsResponseCode.ServerFailure:
+                    case DnsResponseCode.ServerFailure:
+                        _errorIpAddresses.GetOrAdd(clientIpAddress, GetNewCounter).Increment();
                         Interlocked.Increment(ref _totalServerFailure);
                         break;
 
-                    case StatsResponseCode.NxDomain:
+                    case DnsResponseCode.NxDomain:
                         Interlocked.Increment(ref _totalNxDomain);
                         break;
 
-                    case StatsResponseCode.Refused:
+                    case DnsResponseCode.Refused:
+                        _errorIpAddresses.GetOrAdd(clientIpAddress, GetNewCounter).Increment();
                         Interlocked.Increment(ref _totalRefused);
+                        break;
+
+                    case DnsResponseCode.FormatError:
+                        _errorIpAddresses.GetOrAdd(clientIpAddress, GetNewCounter).Increment();
                         break;
                 }
 
                 switch (responseType)
                 {
-                    case StatsResponseType.Authoritative:
+                    case DnsServerResponseType.Authoritative:
                         Interlocked.Increment(ref _totalAuthoritative);
                         break;
 
-                    case StatsResponseType.Recursive: //recursion
+                    case DnsServerResponseType.Recursive:
                         Interlocked.Increment(ref _totalRecursive);
                         break;
 
-                    case StatsResponseType.Cached:
+                    case DnsServerResponseType.Cached:
                         Interlocked.Increment(ref _totalCached);
                         break;
 
-                    case StatsResponseType.Blocked:
-                        _queryBlockedDomains.GetOrAdd(domain, GetNewCounter).Increment();
+                    case DnsServerResponseType.Blocked:
+                        if (query is not null)
+                            _queryBlockedDomains.GetOrAdd(query.Name.ToLower(), GetNewCounter).Increment();
+
                         Interlocked.Increment(ref _totalBlocked);
                         break;
                 }
 
-                _queryTypes.GetOrAdd(query.Type, GetNewCounter).Increment();
+                if (query is not null)
+                    _queryTypes.GetOrAdd(query.Type, GetNewCounter).Increment();
+
                 _clientIpAddresses.GetOrAdd(clientIpAddress, GetNewCounter).Increment();
+                _totalClients = _clientIpAddresses.Count;
             }
 
-            public void Merge(StatCounter statCounter)
+            public void Merge(StatCounter statCounter, bool isDailyStatCounter = false, bool skipLock = false)
             {
-                if (!_locked || !statCounter._locked)
+                if (!skipLock && (!_locked || !statCounter._locked))
                     throw new DnsServerException("StatCounter must be locked.");
 
                 _totalQueries += statCounter._totalQueries;
@@ -1484,8 +1622,17 @@ namespace DnsServerCore.Dns
                 foreach (KeyValuePair<IPAddress, Counter> clientIpAddress in statCounter._clientIpAddresses)
                     _clientIpAddresses.GetOrAdd(clientIpAddress.Key, GetNewCounter).Merge(clientIpAddress.Value);
 
+                foreach (KeyValuePair<IPAddress, Counter> refusedIpAddress in statCounter._errorIpAddresses)
+                    _errorIpAddresses.GetOrAdd(refusedIpAddress.Key, GetNewCounter).Merge(refusedIpAddress.Value);
+
                 foreach (KeyValuePair<DnsQuestionRecord, Counter> query in statCounter._queries)
                     _queries.GetOrAdd(query.Key, GetNewCounter).Merge(query.Value);
+
+                _totalClients = _clientIpAddresses.Count;
+                _totalClientsDailyStatsSummation += statCounter._totalClients;
+
+                if (isDailyStatCounter && (statCounter._totalClients > statCounter._clientIpAddresses.Count))
+                    _truncationFoundDuringMerge = true;
             }
 
             public bool Truncate(int limit)
@@ -1545,7 +1692,7 @@ namespace DnsServerCore.Dns
 
                     if (queryTypes.Count > limit)
                     {
-                        int othersCount = 0;
+                        long othersCount = 0;
 
                         for (int i = limit; i < queryTypes.Count; i++)
                             othersCount += queryTypes[i].Value.Count;
@@ -1580,6 +1727,26 @@ namespace DnsServerCore.Dns
                     truncated = true;
                 }
 
+                if (_errorIpAddresses.Count > limit)
+                {
+                    List<KeyValuePair<IPAddress, Counter>> topErrorClients = new List<KeyValuePair<IPAddress, Counter>>(_errorIpAddresses);
+
+                    _errorIpAddresses.Clear();
+
+                    topErrorClients.Sort(delegate (KeyValuePair<IPAddress, Counter> item1, KeyValuePair<IPAddress, Counter> item2)
+                    {
+                        return item2.Value.Count.CompareTo(item1.Value.Count);
+                    });
+
+                    if (topErrorClients.Count > limit)
+                        topErrorClients.RemoveRange(limit, topErrorClients.Count - limit);
+
+                    foreach (KeyValuePair<IPAddress, Counter> item in topErrorClients)
+                        _errorIpAddresses[item.Key] = item.Value;
+
+                    truncated = true;
+                }
+
                 if (_queries.Count > limit)
                 {
                     //only last hour queries data is required for cache auto prefetching
@@ -1597,7 +1764,7 @@ namespace DnsServerCore.Dns
                     throw new DnsServerException("StatCounter must be locked.");
 
                 bW.Write(Encoding.ASCII.GetBytes("SC")); //format
-                bW.Write((byte)4); //version
+                bW.Write((byte)7); //version
 
                 bW.Write(_totalQueries);
                 bW.Write(_totalNoError);
@@ -1609,6 +1776,8 @@ namespace DnsServerCore.Dns
                 bW.Write(_totalRecursive);
                 bW.Write(_totalCached);
                 bW.Write(_totalBlocked);
+
+                bW.Write(_totalClients);
 
                 {
                     bW.Write(_queryDomains.Count);
@@ -1654,75 +1823,146 @@ namespace DnsServerCore.Dns
                         bW.Write(query.Value.Count);
                     }
                 }
+
+                {
+                    bW.Write(_errorIpAddresses.Count);
+                    foreach (KeyValuePair<IPAddress, Counter> refusedIpAddress in _errorIpAddresses)
+                    {
+                        refusedIpAddress.Key.WriteTo(bW);
+                        bW.Write(refusedIpAddress.Value.Count);
+                    }
+                }
             }
 
-            public List<KeyValuePair<string, int>> GetTopDomains(int limit)
+            public List<KeyValuePair<string, long>> GetTopDomains(int limit)
             {
-                List<KeyValuePair<string, int>> topDomains = new List<KeyValuePair<string, int>>(_queryDomains.Count);
+                List<KeyValuePair<string, long>> topDomains = new List<KeyValuePair<string, long>>(_queryDomains.Count);
 
                 foreach (KeyValuePair<string, Counter> item in _queryDomains)
-                    topDomains.Add(new KeyValuePair<string, int>(item.Key, item.Value.Count));
+                    topDomains.Add(new KeyValuePair<string, long>(item.Key, item.Value.Count));
 
                 return GetTopList(topDomains, limit);
             }
 
-            public List<KeyValuePair<string, int>> GetTopBlockedDomains(int limit)
+            public List<KeyValuePair<string, long>> GetTopBlockedDomains(int limit)
             {
-                List<KeyValuePair<string, int>> topBlockedDomains = new List<KeyValuePair<string, int>>(_queryBlockedDomains.Count);
+                List<KeyValuePair<string, long>> topBlockedDomains = new List<KeyValuePair<string, long>>(_queryBlockedDomains.Count);
 
                 foreach (KeyValuePair<string, Counter> item in _queryBlockedDomains)
-                    topBlockedDomains.Add(new KeyValuePair<string, int>(item.Key, item.Value.Count));
+                    topBlockedDomains.Add(new KeyValuePair<string, long>(item.Key, item.Value.Count));
 
                 return GetTopList(topBlockedDomains, limit);
             }
 
-            public List<KeyValuePair<string, int>> GetTopClients(int limit)
+            public List<KeyValuePair<string, long>> GetTopClients(int limit)
             {
-                List<KeyValuePair<string, int>> topClients = new List<KeyValuePair<string, int>>(_clientIpAddresses.Count);
+                List<KeyValuePair<string, long>> topClients = new List<KeyValuePair<string, long>>(_clientIpAddresses.Count);
 
                 foreach (KeyValuePair<IPAddress, Counter> item in _clientIpAddresses)
-                    topClients.Add(new KeyValuePair<string, int>(item.Key.ToString(), item.Value.Count));
+                    topClients.Add(new KeyValuePair<string, long>(item.Key.ToString(), item.Value.Count));
 
                 return GetTopList(topClients, limit);
             }
 
-            public List<KeyValuePair<string, int>> GetTopQueryTypes(int limit)
+            public List<KeyValuePair<string, long>> GetTopQueryTypes(int limit)
             {
-                List<KeyValuePair<string, int>> queryTypes = new List<KeyValuePair<string, int>>(_queryTypes.Count);
+                List<KeyValuePair<string, long>> queryTypes = new List<KeyValuePair<string, long>>(_queryTypes.Count);
 
                 foreach (KeyValuePair<DnsResourceRecordType, Counter> item in _queryTypes)
-                    queryTypes.Add(new KeyValuePair<string, int>(item.Key.ToString(), item.Value.Count));
+                    queryTypes.Add(new KeyValuePair<string, long>(item.Key.ToString(), item.Value.Count));
 
-                queryTypes.Sort(delegate (KeyValuePair<string, int> item1, KeyValuePair<string, int> item2)
+                queryTypes.Sort(delegate (KeyValuePair<string, long> item1, KeyValuePair<string, long> item2)
                 {
                     return item2.Value.CompareTo(item1.Value);
                 });
 
                 if (queryTypes.Count > limit)
                 {
-                    int othersCount = 0;
+                    long othersCount = 0;
 
                     for (int i = limit; i < queryTypes.Count; i++)
                         othersCount += queryTypes[i].Value;
 
                     queryTypes.RemoveRange((limit - 1), queryTypes.Count - (limit - 1));
-                    queryTypes.Add(new KeyValuePair<string, int>("Others", othersCount));
+                    queryTypes.Add(new KeyValuePair<string, long>("Others", othersCount));
                 }
 
                 return queryTypes;
             }
 
-            public List<KeyValuePair<DnsQuestionRecord, int>> GetEligibleQueries(int minimumHits)
+            public List<KeyValuePair<DnsQuestionRecord, long>> GetEligibleQueries(int minimumHits)
             {
-                List<KeyValuePair<DnsQuestionRecord, int>> eligibleQueries = new List<KeyValuePair<DnsQuestionRecord, int>>(Convert.ToInt32(_queries.Count * 0.1));
+                List<KeyValuePair<DnsQuestionRecord, long>> eligibleQueries = new List<KeyValuePair<DnsQuestionRecord, long>>(Convert.ToInt32(_queries.Count * 0.1));
 
                 foreach (KeyValuePair<DnsQuestionRecord, Counter> item in _queries)
                 {
                     if (item.Value.Count >= minimumHits)
-                        eligibleQueries.Add(new KeyValuePair<DnsQuestionRecord, int>(item.Key, item.Value.Count));
+                        eligibleQueries.Add(new KeyValuePair<DnsQuestionRecord, long>(item.Key, item.Value.Count));
                 }
 
                 return eligibleQueries;
+            }
+
+            public IReadOnlyDictionary<IPAddress, long> GetClientSubnetStats(int ipv4PrefixLength, int ipv6PrefixLength)
+            {
+                Dictionary<IPAddress, long> clientSubnetStats = new Dictionary<IPAddress, long>(_clientIpAddresses.Count);
+
+                foreach (KeyValuePair<IPAddress, Counter> item in _clientIpAddresses)
+                {
+                    IPAddress clientSubnet;
+
+                    switch (item.Key.AddressFamily)
+                    {
+                        case AddressFamily.InterNetwork:
+                            clientSubnet = item.Key.GetNetworkAddress(ipv4PrefixLength);
+                            break;
+
+                        case AddressFamily.InterNetworkV6:
+                            clientSubnet = item.Key.GetNetworkAddress(ipv6PrefixLength);
+                            break;
+
+                        default:
+                            throw new NotSupportedException("AddressFamily not supported.");
+                    }
+
+                    if (clientSubnetStats.TryGetValue(clientSubnet, out long existingValue))
+                        clientSubnetStats[clientSubnet] = existingValue + item.Value.Count;
+                    else
+                        clientSubnetStats.Add(clientSubnet, item.Value.Count);
+                }
+
+                return clientSubnetStats;
+            }
+
+            public IReadOnlyDictionary<IPAddress, long> GetErrorClientSubnetStats(int ipv4PrefixLength, int ipv6PrefixLength)
+            {
+                Dictionary<IPAddress, long> errorClientSubnetStats = new Dictionary<IPAddress, long>(_errorIpAddresses.Count);
+
+                foreach (KeyValuePair<IPAddress, Counter> item in _errorIpAddresses)
+                {
+                    IPAddress clientSubnet;
+
+                    switch (item.Key.AddressFamily)
+                    {
+                        case AddressFamily.InterNetwork:
+                            clientSubnet = item.Key.GetNetworkAddress(ipv4PrefixLength);
+                            break;
+
+                        case AddressFamily.InterNetworkV6:
+                            clientSubnet = item.Key.GetNetworkAddress(ipv6PrefixLength);
+                            break;
+
+                        default:
+                            throw new NotSupportedException("AddressFamily not supported.");
+                    }
+
+                    if (errorClientSubnetStats.TryGetValue(clientSubnet, out long existingValue))
+                        errorClientSubnetStats[clientSubnet] = existingValue + item.Value.Count;
+                    else
+                        errorClientSubnetStats.Add(clientSubnet, item.Value.Count);
+                }
+
+                return errorClientSubnetStats;
             }
 
             #endregion
@@ -1732,35 +1972,43 @@ namespace DnsServerCore.Dns
             public bool IsLocked
             { get { return _locked; } }
 
-            public int TotalQueries
+            public long TotalQueries
             { get { return _totalQueries; } }
 
-            public int TotalNoError
+            public long TotalNoError
             { get { return _totalNoError; } }
 
-            public int TotalServerFailure
+            public long TotalServerFailure
             { get { return _totalServerFailure; } }
 
-            public int TotalNxDomain
+            public long TotalNxDomain
             { get { return _totalNxDomain; } }
 
-            public int TotalRefused
+            public long TotalRefused
             { get { return _totalRefused; } }
 
-            public int TotalAuthoritative
+            public long TotalAuthoritative
             { get { return _totalAuthoritative; } }
 
-            public int TotalRecursive
+            public long TotalRecursive
             { get { return _totalRecursive; } }
 
-            public int TotalCached
+            public long TotalCached
             { get { return _totalCached; } }
 
-            public int TotalBlocked
+            public long TotalBlocked
             { get { return _totalBlocked; } }
 
-            public int TotalClients
-            { get { return _clientIpAddresses.Count; } }
+            public long TotalClients
+            {
+                get
+                {
+                    if (_truncationFoundDuringMerge)
+                        return _totalClientsDailyStatsSummation;
+
+                    return _totalClients;
+                }
+            }
 
             #endregion
 
@@ -1768,7 +2016,7 @@ namespace DnsServerCore.Dns
             {
                 #region variables
 
-                int _count;
+                long _count;
 
                 #endregion
 
@@ -1777,7 +2025,7 @@ namespace DnsServerCore.Dns
                 public Counter()
                 { }
 
-                public Counter(int count)
+                public Counter(long count)
                 {
                     _count = count;
                 }
@@ -1800,7 +2048,7 @@ namespace DnsServerCore.Dns
 
                 #region properties
 
-                public int Count
+                public long Count
                 { get { return _count; } }
 
                 #endregion
@@ -1811,23 +2059,25 @@ namespace DnsServerCore.Dns
         {
             #region variables
 
-            public readonly DateTime _dateTime;
-            public readonly DnsQuestionRecord _query;
-            public readonly StatsResponseCode _responseCode;
-            public readonly StatsResponseType _responseType;
-            public readonly IPAddress _clientIpAddress;
+            public readonly DateTime _timestamp;
+
+            public readonly DnsDatagram _request;
+            public readonly IPEndPoint _remoteEP;
+            public readonly DnsTransportProtocol _protocol;
+            public readonly DnsDatagram _response;
 
             #endregion
 
             #region constructor
 
-            public StatsQueueItem(DnsQuestionRecord query, StatsResponseCode responseCode, StatsResponseType responseType, IPAddress clientIpAddress)
+            public StatsQueueItem(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, DnsDatagram response)
             {
-                _dateTime = DateTime.UtcNow;
-                _query = query;
-                _responseCode = responseCode;
-                _responseType = responseType;
-                _clientIpAddress = clientIpAddress;
+                _timestamp = DateTime.UtcNow;
+
+                _request = request;
+                _remoteEP = remoteEP;
+                _protocol = protocol;
+                _response = response;
             }
 
             #endregion

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2020  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -17,27 +17,33 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
 
+using DnsServerCore.Dns.ResourceRecords;
 using System;
 using System.Collections.Generic;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
+using TechnitiumLibrary.Net.Proxy;
 
 namespace DnsServerCore.Dns.Zones
 {
-    class ForwarderZone : AuthZone
+    class ForwarderZone : ApexZone
     {
         #region constructor
 
         public ForwarderZone(AuthZoneInfo zoneInfo)
-            : base(zoneInfo.Name)
-        {
-            _disabled = zoneInfo.Disabled;
-        }
+            : base(zoneInfo)
+        { }
 
-        public ForwarderZone(string name, DnsTransportProtocol forwarderProtocol, string forwarder)
+        public ForwarderZone(string name, DnsTransportProtocol forwarderProtocol, string forwarder, bool dnssecValidation, NetProxyType proxyType, string proxyAddress, ushort proxyPort, string proxyUsername, string proxyPassword, string fwdRecordComments)
             : base(name)
         {
-            DnsResourceRecord fwdRecord = new DnsResourceRecord(name, DnsResourceRecordType.FWD, DnsClass.IN, 0, new DnsForwarderRecord(forwarderProtocol, forwarder));
+            _zoneTransfer = AuthZoneTransfer.Deny;
+            _notify = AuthZoneNotify.None;
+
+            DnsResourceRecord fwdRecord = new DnsResourceRecord(name, DnsResourceRecordType.FWD, DnsClass.IN, 0, new DnsForwarderRecordData(forwarderProtocol, forwarder, dnssecValidation, proxyType, proxyAddress, proxyPort, proxyUsername, proxyPassword));
+
+            if (!string.IsNullOrEmpty(fwdRecordComments))
+                fwdRecord.SetComments(fwdRecordComments);
 
             _entries[DnsResourceRecordType.FWD] = new DnsResourceRecord[] { fwdRecord };
         }
@@ -51,13 +57,11 @@ namespace DnsServerCore.Dns.Zones
             switch (type)
             {
                 case DnsResourceRecordType.CNAME:
-                    throw new InvalidOperationException("Cannot set CNAME record to zone root.");
-
-                case DnsResourceRecordType.NS:
-                    throw new InvalidOperationException("Cannot set NS record to forwarder zone root.");
+                    throw new InvalidOperationException("Cannot set CNAME record at zone apex.");
 
                 case DnsResourceRecordType.SOA:
-                    throw new InvalidOperationException("Cannot set SOA record to forwarder zone root.");
+                case DnsResourceRecordType.DS:
+                    throw new DnsServerException("The record type is not supported by forwarder zones.");
 
                 default:
                     base.SetRecords(type, records);
@@ -69,13 +73,35 @@ namespace DnsServerCore.Dns.Zones
         {
             switch (record.Type)
             {
-                case DnsResourceRecordType.NS:
-                    throw new InvalidOperationException("Cannot add NS record at forwarder zone root.");
+                case DnsResourceRecordType.DS:
+                    throw new DnsServerException("The record type is not supported by forwarder zones.");
 
                 default:
                     base.AddRecord(record);
                     break;
             }
+        }
+
+        #endregion
+
+        #region properties
+
+        public override AuthZoneTransfer ZoneTransfer
+        {
+            get { return _zoneTransfer; }
+            set { throw new InvalidOperationException(); }
+        }
+
+        public override AuthZoneNotify Notify
+        {
+            get { return _notify; }
+            set { throw new InvalidOperationException(); }
+        }
+
+        public override AuthZoneUpdate Update
+        {
+            get { return _update; }
+            set { throw new InvalidOperationException(); }
         }
 
         #endregion

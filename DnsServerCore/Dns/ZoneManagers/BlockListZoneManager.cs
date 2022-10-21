@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -42,11 +42,11 @@ namespace DnsServerCore.Dns.ZoneManagers
         readonly List<Uri> _blockListUrls = new List<Uri>();
         IReadOnlyDictionary<string, List<Uri>> _blockListZone = new Dictionary<string, List<Uri>>();
 
-        DnsSOARecord _soaRecord;
-        DnsNSRecord _nsRecord;
+        DnsSOARecordData _soaRecord;
+        DnsNSRecordData _nsRecord;
 
-        readonly DnsARecord _aRecord = new DnsARecord(IPAddress.Any);
-        readonly DnsAAAARecord _aaaaRecord = new DnsAAAARecord(IPAddress.IPv6Any);
+        readonly IReadOnlyCollection<DnsARecordData> _aRecords = new DnsARecordData[] { new DnsARecordData(IPAddress.Any) };
+        readonly IReadOnlyCollection<DnsAAAARecordData> _aaaaRecords = new DnsAAAARecordData[] { new DnsAAAARecordData(IPAddress.IPv6Any) };
 
         #endregion
 
@@ -70,15 +70,15 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         private void UpdateServerDomain(string serverDomain)
         {
-            _soaRecord = new DnsSOARecord(serverDomain, "hostadmin." + serverDomain, 1, 14400, 3600, 604800, 900);
-            _nsRecord = new DnsNSRecord(serverDomain);
+            _soaRecord = new DnsSOARecordData(serverDomain, "hostadmin@" + serverDomain, 1, 14400, 3600, 604800, 60);
+            _nsRecord = new DnsNSRecordData(serverDomain);
         }
 
         private string GetBlockListFilePath(Uri blockListUrl)
         {
             using (HashAlgorithm hash = SHA256.Create())
             {
-                return Path.Combine(_localCacheFolder, BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(blockListUrl.AbsoluteUri))).Replace("-", "").ToLower());
+                return Path.Combine(_localCacheFolder, Convert.ToHexString(hash.ComputeHash(Encoding.UTF8.GetBytes(blockListUrl.AbsoluteUri))).ToLower());
             }
         }
 
@@ -106,7 +106,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             return word;
         }
 
-        private Queue<string> ReadListFile(Uri listUrl, bool isAllow)
+        private Queue<string> ReadListFile(Uri listUrl, bool isAllowList)
         {
             Queue<string> domains = new Queue<string>();
 
@@ -114,7 +114,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             {
                 LogManager log = _dnsServer.LogManager;
                 if (log != null)
-                    log.Write("DNS Server is reading " + (isAllow ? "allow" : "block") + " list from: " + listUrl.AbsoluteUri);
+                    log.Write("DNS Server is reading " + (isAllowList ? "allow" : "block") + " list from: " + listUrl.AbsoluteUri);
 
                 using (FileStream fS = new FileStream(GetBlockListFilePath(listUrl), FileMode.Open, FileAccess.Read))
                 {
@@ -140,7 +140,6 @@ namespace DnsServerCore.Dns.ZoneManagers
                             continue; //skip comment line
 
                         firstWord = PopWord(ref line);
-
 
                         if (line.Length == 0)
                         {
@@ -186,42 +185,51 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
 
                 if (log != null)
-                    log.Write("DNS Server " + (isAllow ? "allow" : "block") + " list file was read (" + domains.Count + " domains) from: " + listUrl.AbsoluteUri);
+                    log.Write("DNS Server read " + (isAllowList ? "allow" : "block") + " list file (" + domains.Count + " domains) from: " + listUrl.AbsoluteUri);
             }
             catch (Exception ex)
             {
                 LogManager log = _dnsServer.LogManager;
                 if (log != null)
-                    log.Write("DNS Server failed to read " + (isAllow ? "allow" : "block") + " list from: " + listUrl.AbsoluteUri + "\r\n" + ex.ToString());
+                    log.Write("DNS Server failed to read " + (isAllowList ? "allow" : "block") + " list from: " + listUrl.AbsoluteUri + "\r\n" + ex.ToString());
             }
 
             return domains;
         }
 
-        private static string GetParentZone(string domain)
-        {
-            int i = domain.IndexOf('.');
-            if (i > -1)
-                return domain.Substring(i + 1);
-
-            //dont return root zone
-            return null;
-        }
-
-        private List<Uri> IsZoneBlocked(string domain)
+        private List<Uri> IsZoneBlocked(string domain, out string blockedDomain)
         {
             domain = domain.ToLower();
 
             do
             {
                 if (_blockListZone.TryGetValue(domain, out List<Uri> blockLists))
-                    return blockLists; //found zone blocked
+                {
+                    //found zone blocked
+                    blockedDomain = domain;
+                    return blockLists;
+                }
 
-                domain = GetParentZone(domain);
+                domain = AuthZoneManager.GetParentZone(domain);
             }
-            while (domain != null);
+            while (domain is not null);
 
+            blockedDomain = null;
             return null;
+        }
+
+        private static bool IsZoneAllowed(Dictionary<string, object> allowedDomains, string domain)
+        {
+            do
+            {
+                if (allowedDomains.TryGetValue(domain, out _))
+                    return true;
+
+                domain = AuthZoneManager.GetParentZone(domain);
+            }
+            while (domain is not null);
+
+            return false;
         }
 
         #endregion
@@ -233,9 +241,9 @@ namespace DnsServerCore.Dns.ZoneManagers
             //read all allowed domains in dictionary
             Dictionary<string, object> allowedDomains = new Dictionary<string, object>();
 
-            foreach (Uri allowListUri in _allowListUrls)
+            foreach (Uri allowListUrl in _allowListUrls)
             {
-                Queue<string> queue = ReadListFile(allowListUri, true);
+                Queue<string> queue = ReadListFile(allowListUrl, true);
 
                 while (queue.Count > 0)
                 {
@@ -259,7 +267,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
             }
 
-            //load custom blocked zone into new block zone
+            //load block list zone
             Dictionary<string, List<Uri>> blockListZone = new Dictionary<string, List<Uri>>(totalDomains);
 
             foreach (KeyValuePair<Uri, Queue<string>> blockListQueue in blockListQueues)
@@ -270,7 +278,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 {
                     string domain = queue.Dequeue();
 
-                    if (allowedDomains.TryGetValue(domain, out _))
+                    if (IsZoneAllowed(allowedDomains, domain))
                         continue; //domain is in allowed list so skip adding it to block list zone
 
                     if (!blockListZone.TryGetValue(domain, out List<Uri> blockLists))
@@ -299,7 +307,7 @@ namespace DnsServerCore.Dns.ZoneManagers
         public async Task<bool> UpdateBlockListsAsync()
         {
             bool downloaded = false;
-            bool notmodified = false;
+            bool notModified = false;
 
             async Task DownloadListUrlAsync(Uri listUrl, bool isAllowList)
             {
@@ -313,6 +321,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                     SocketsHttpHandler handler = new SocketsHttpHandler();
                     handler.Proxy = _dnsServer.Proxy;
+                    handler.UseProxy = _dnsServer.Proxy is not null;
                     handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
 
                     using (HttpClient http = new HttpClient(handler))
@@ -351,7 +360,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                             case HttpStatusCode.NotModified:
                                 {
-                                    notmodified = true;
+                                    notModified = true;
 
                                     LogManager log = _dnsServer.LogManager;
                                     if (log != null)
@@ -390,52 +399,102 @@ namespace DnsServerCore.Dns.ZoneManagers
                 GC.Collect();
             }
 
-            return downloaded || notmodified;
+            return downloaded || notModified;
         }
 
         public DnsDatagram Query(DnsDatagram request)
         {
             DnsQuestionRecord question = request.Question[0];
 
-            List<Uri> blockLists = IsZoneBlocked(question.Name);
-            if (blockLists == null)
+            List<Uri> blockLists = IsZoneBlocked(question.Name, out string blockedDomain);
+            if (blockLists is null)
                 return null; //zone not blocked
 
             //zone is blocked
-            if (_dnsServer.UseNxDomainForBlocking && (question.Type != DnsResourceRecordType.TXT))
-                return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NxDomain, request.Question);
-
-            DnsResourceRecord[] answers = null;
-            DnsResourceRecord[] authority = null;
-
-            switch (question.Type)
+            if (_dnsServer.AllowTxtBlockingReport && (question.Type == DnsResourceRecordType.TXT))
             {
-                case DnsResourceRecordType.A:
-                    answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, 60, _aRecord) };
-                    break;
+                //return meta data
+                DnsResourceRecord[] answer = new DnsResourceRecord[blockLists.Count];
 
-                case DnsResourceRecordType.AAAA:
-                    answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, 60, _aaaaRecord) };
-                    break;
+                for (int i = 0; i < answer.Length; i++)
+                    answer[i] = new DnsResourceRecord(question.Name, DnsResourceRecordType.TXT, question.Class, 60, new DnsTXTRecordData("source=block-list-zone; blockListUrl=" + blockLists[i].AbsoluteUri + "; domain=" + blockedDomain));
 
-                case DnsResourceRecordType.NS:
-                    answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.NS, question.Class, 60, _nsRecord) };
-                    break;
-
-                case DnsResourceRecordType.TXT:
-                    answers = new DnsResourceRecord[blockLists.Count];
-
-                    for (int i = 0; i < answers.Length; i++)
-                        answers[i] = new DnsResourceRecord(question.Name, DnsResourceRecordType.TXT, question.Class, 60, new DnsTXTRecord("blockList=" + blockLists[i].AbsoluteUri + "; domain=" + question.Name));
-
-                    break;
-
-                default:
-                    authority = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) };
-                    break;
+                return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NoError, request.Question, answer);
             }
+            else
+            {
+                IReadOnlyCollection<DnsARecordData> aRecords;
+                IReadOnlyCollection<DnsAAAARecordData> aaaaRecords;
 
-            return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NoError, request.Question, answers, authority);
+                switch (_dnsServer.BlockingType)
+                {
+                    case DnsServerBlockingType.AnyAddress:
+                        aRecords = _aRecords;
+                        aaaaRecords = _aaaaRecords;
+                        break;
+
+                    case DnsServerBlockingType.CustomAddress:
+                        aRecords = _dnsServer.CustomBlockingARecords;
+                        aaaaRecords = _dnsServer.CustomBlockingAAAARecords;
+                        break;
+
+                    case DnsServerBlockingType.NxDomain:
+                        string parentDomain = AuthZoneManager.GetParentZone(blockedDomain);
+                        if (parentDomain is null)
+                            parentDomain = string.Empty;
+
+                        return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NxDomain, request.Question, null, new DnsResourceRecord[] { new DnsResourceRecord(parentDomain, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) });
+
+                    default:
+                        throw new InvalidOperationException();
+                }
+
+                IReadOnlyList<DnsResourceRecord> answer = null;
+                IReadOnlyList<DnsResourceRecord> authority = null;
+
+                switch (question.Type)
+                {
+                    case DnsResourceRecordType.A:
+                        {
+                            List<DnsResourceRecord> rrList = new List<DnsResourceRecord>(aRecords.Count);
+
+                            foreach (DnsARecordData record in aRecords)
+                                rrList.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, 60, record));
+
+                            answer = rrList;
+                        }
+                        break;
+
+                    case DnsResourceRecordType.AAAA:
+                        {
+                            List<DnsResourceRecord> rrList = new List<DnsResourceRecord>(aaaaRecords.Count);
+
+                            foreach (DnsAAAARecordData record in aaaaRecords)
+                                rrList.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, 60, record));
+
+                            answer = rrList;
+                        }
+                        break;
+
+                    case DnsResourceRecordType.NS:
+                        if (question.Name.Equals(blockedDomain, StringComparison.OrdinalIgnoreCase))
+                            answer = new DnsResourceRecord[] { new DnsResourceRecord(blockedDomain, DnsResourceRecordType.NS, question.Class, 60, _nsRecord) };
+                        else
+                            authority = new DnsResourceRecord[] { new DnsResourceRecord(blockedDomain, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) };
+
+                        break;
+
+                    case DnsResourceRecordType.SOA:
+                        answer = new DnsResourceRecord[] { new DnsResourceRecord(blockedDomain, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) };
+                        break;
+
+                    default:
+                        authority = new DnsResourceRecord[] { new DnsResourceRecord(blockedDomain, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) };
+                        break;
+                }
+
+                return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NoError, request.Question, answer, authority);
+            }
         }
 
         #endregion
