@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -27,6 +27,7 @@ using System.Net;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore
 {
@@ -75,6 +76,22 @@ namespace DnsServerCore
             jsonWriter.WriteEndArray();
         }
 
+        public Task DownloadLogAsync(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            string strFileName = request.QueryString["fileName"];
+            if (string.IsNullOrEmpty(strFileName))
+                throw new DnsWebServiceException("Parameter 'fileName' missing.");
+
+            int limit;
+            string strLimit = request.QueryString["limit"];
+            if (string.IsNullOrEmpty(strLimit))
+                limit = 0;
+            else
+                limit = int.Parse(strLimit);
+
+            return _dnsWebService.Log.DownloadLogAsync(request, response, strFileName, limit * 1024 * 1024);
+        }
+
         public void DeleteLog(HttpListenerRequest request)
         {
             string log = request.QueryString["log"];
@@ -83,21 +100,21 @@ namespace DnsServerCore
 
             _dnsWebService.Log.DeleteLog(log);
 
-            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] Log file was deleted: " + log);
+            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] Log file was deleted: " + log);
         }
 
         public void DeleteAllLogs(HttpListenerRequest request)
         {
             _dnsWebService.Log.DeleteAllLogs();
 
-            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] All log files were deleted.");
+            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] All log files were deleted.");
         }
 
         public void DeleteAllStats(HttpListenerRequest request)
         {
             _dnsWebService.DnsServer.StatsManager.DeleteAllStats();
 
-            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] All stats files were deleted.");
+            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] All stats files were deleted.");
         }
 
         public async Task QueryLogsAsync(HttpListenerRequest request, JsonTextWriter jsonWriter)

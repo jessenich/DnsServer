@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -27,6 +27,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore
 {
@@ -448,7 +449,7 @@ namespace DnsServerCore
 
                     if (fS.Length > limit)
                     {
-                        byte[] buffer = Encoding.UTF8.GetBytes("####___TRUNCATED___####");
+                        byte[] buffer = Encoding.UTF8.GetBytes("\r\n####___TRUNCATED___####");
                         s.Write(buffer, 0, buffer.Length);
                     }
                 }
@@ -552,6 +553,36 @@ namespace DnsServerCore
                     }
 
                     answer += "]";
+
+                    if (response.Additional.Count > 0)
+                    {
+                        switch (q.Type)
+                        {
+                            case DnsResourceRecordType.NS:
+                            case DnsResourceRecordType.MX:
+                            case DnsResourceRecordType.SRV:
+                                answer += "; ADDITIONAL: [";
+
+                                for (int i = 0; i < response.Additional.Count; i++)
+                                {
+                                    DnsResourceRecord additional = response.Additional[i];
+
+                                    switch (additional.Type)
+                                    {
+                                        case DnsResourceRecordType.A:
+                                        case DnsResourceRecordType.AAAA:
+                                            if (i > 0)
+                                                answer += ", ";
+
+                                            answer += additional.Name + " (" + additional.RDATA.ToString() + ")";
+                                            break;
+                                    }
+                                }
+
+                                answer += "]";
+                                break;
+                        }
+                    }
                 }
 
                 responseInfo = " RCODE: " + response.RCODE.ToString() + "; ANSWER: " + answer;

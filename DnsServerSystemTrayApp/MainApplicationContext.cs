@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -105,7 +105,34 @@ namespace DnsServerSystemTrayApp
                         break;
 
                     case "--first-run":
-                        SetNetworkDns(new DnsProvider("Technitium", new IPAddress[] { IPAddress.Loopback, IPAddress.IPv6Loopback }));
+                        bool usingLoopbackAsDns = false;
+
+                        try
+                        {
+                            foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+                            {
+                                if (nic.OperationalStatus != OperationalStatus.Up)
+                                    continue;
+
+                                foreach (IPAddress dnsAddress in nic.GetIPProperties().DnsAddresses)
+                                {
+                                    if (IPAddress.IsLoopback(dnsAddress))
+                                    {
+                                        usingLoopbackAsDns = true;
+                                        break;
+                                    }
+                                }
+
+                                if (usingLoopbackAsDns)
+                                    break;
+                            }
+                        }
+                        catch
+                        { }
+
+                        if (!usingLoopbackAsDns && MessageBox.Show("Do you want to update this computer's network connections to use the locally running Technitium DNS Server?\r\n\r\nNote! It is recommended that you use the locally running Technitium DNS Server unless you explicitly want to keep using your existing network DNS configuration.", "Switch Network DNS? - Technitium DNS Server", MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                            SetNetworkDns(new DnsProvider("Technitium", new IPAddress[] { IPAddress.Loopback, IPAddress.IPv6Loopback }));
+
                         break;
                 }
             }
@@ -294,7 +321,7 @@ namespace DnsServerSystemTrayApp
             }
         }
 
-        private void SetNetworkDns(DnsProvider dnsProvider)
+        private static void SetNetworkDns(DnsProvider dnsProvider)
         {
             if (!Program.IsAdmin)
             {
@@ -446,7 +473,6 @@ namespace DnsServerSystemTrayApp
                 catch
                 { }
 
-
                 NetworkDnsMenuItem.DropDownItems.Clear();
                 NetworkDnsMenuItem.DropDownItems.Add(DefaultNetworkDnsMenuItem);
                 NetworkDnsMenuItem.DropDownItems.Add(new ToolStripSeparator());
@@ -566,11 +592,15 @@ namespace DnsServerSystemTrayApp
                     BinaryReader bR = new BinaryReader(fS);
 
                     if (Encoding.ASCII.GetString(bR.ReadBytes(2)) != "DS") //format
-                        throw new InvalidDataException("DnsServer config file format is invalid.");
+                        throw new InvalidDataException("DNS Server config file format is invalid.");
 
                     int version = bR.ReadByte();
 
-                    if (version > 1)
+                    if (version >= 28)
+                    {
+                        port = bR.ReadInt32();
+                    }
+                    else if (version > 1)
                     {
                         string serverDomain = bR.ReadShortString();
                         port = bR.ReadInt32();

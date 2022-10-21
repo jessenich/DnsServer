@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -24,8 +24,8 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
 using System.Threading.Tasks;
-using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore
 {
@@ -48,7 +48,7 @@ namespace DnsServerCore
 
         #region private
 
-        private static void WriteChartDataSet(JsonTextWriter jsonWriter, string label, string backgroundColor, string borderColor, List<KeyValuePair<string, int>> statsPerInterval)
+        private static void WriteChartDataSet(JsonTextWriter jsonWriter, string label, string backgroundColor, string borderColor, List<KeyValuePair<string, long>> statsPerInterval)
         {
             jsonWriter.WriteStartObject();
 
@@ -69,14 +69,14 @@ namespace DnsServerCore
 
             jsonWriter.WritePropertyName("data");
             jsonWriter.WriteStartArray();
-            foreach (KeyValuePair<string, int> item in statsPerInterval)
+            foreach (KeyValuePair<string, long> item in statsPerInterval)
                 jsonWriter.WriteValue(item.Value);
             jsonWriter.WriteEndArray();
 
             jsonWriter.WriteEndObject();
         }
 
-        private async Task<IDictionary<string, string>> ResolvePtrTopClientsAsync(List<KeyValuePair<string, int>> topClients)
+        private async Task<IDictionary<string, string>> ResolvePtrTopClientsAsync(List<KeyValuePair<string, long>> topClients)
         {
             IDictionary<string, string> dhcpClientIpMap = _dnsWebService.DhcpServer.GetAddressHostNameMap();
 
@@ -90,7 +90,7 @@ namespace DnsServerCore
                 if (IPAddress.IsLoopback(address))
                     return new KeyValuePair<string, string>(ip, "localhost");
 
-                DnsDatagram ptrResponse = await _dnsWebService.DnsServer.DirectQueryAsync(new DnsQuestionRecord(address, DnsClass.IN)).WithTimeout(500);
+                DnsDatagram ptrResponse = await _dnsWebService.DnsServer.DirectQueryAsync(new DnsQuestionRecord(address, DnsClass.IN), 500);
                 if (ptrResponse.Answer.Count > 0)
                 {
                     IReadOnlyList<string> ptrDomains = DnsClient.ParseResponsePTR(ptrResponse);
@@ -103,7 +103,7 @@ namespace DnsServerCore
 
             List<Task<KeyValuePair<string, string>>> resolverTasks = new List<Task<KeyValuePair<string, string>>>();
 
-            foreach (KeyValuePair<string, int> item in topClients)
+            foreach (KeyValuePair<string, long> item in topClients)
             {
                 resolverTasks.Add(ResolvePtrAsync(item.Key));
             }
@@ -134,28 +134,41 @@ namespace DnsServerCore
             if (string.IsNullOrEmpty(strType))
                 strType = "lastHour";
 
-            Dictionary<string, List<KeyValuePair<string, int>>> data;
+            bool utcFormat;
+            string strUtcFormat = request.QueryString["utc"];
+            if (string.IsNullOrEmpty(strUtcFormat))
+                utcFormat = false;
+            else
+                utcFormat = bool.Parse(strUtcFormat);
+
+            Dictionary<string, List<KeyValuePair<string, long>>> data;
+            string labelFormat;
 
             switch (strType)
             {
                 case "lastHour":
-                    data = _dnsWebService.DnsServer.StatsManager.GetLastHourMinuteWiseStats();
+                    data = _dnsWebService.DnsServer.StatsManager.GetLastHourMinuteWiseStats(utcFormat);
+                    labelFormat = "HH:mm";
                     break;
 
                 case "lastDay":
-                    data = _dnsWebService.DnsServer.StatsManager.GetLastDayHourWiseStats();
+                    data = _dnsWebService.DnsServer.StatsManager.GetLastDayHourWiseStats(utcFormat);
+                    labelFormat = "MM/DD HH:00";
                     break;
 
                 case "lastWeek":
-                    data = _dnsWebService.DnsServer.StatsManager.GetLastWeekDayWiseStats();
+                    data = _dnsWebService.DnsServer.StatsManager.GetLastWeekDayWiseStats(utcFormat);
+                    labelFormat = "MM/DD";
                     break;
 
                 case "lastMonth":
-                    data = _dnsWebService.DnsServer.StatsManager.GetLastMonthDayWiseStats();
+                    data = _dnsWebService.DnsServer.StatsManager.GetLastMonthDayWiseStats(utcFormat);
+                    labelFormat = "MM/DD";
                     break;
 
                 case "lastYear":
-                    data = _dnsWebService.DnsServer.StatsManager.GetLastYearMonthWiseStats();
+                    labelFormat = "MM/YYYY";
+                    data = _dnsWebService.DnsServer.StatsManager.GetLastYearMonthWiseStats(utcFormat);
                     break;
 
                 case "custom":
@@ -177,9 +190,15 @@ namespace DnsServerCore
                         throw new DnsWebServiceException("Start date must be less than or equal to end date.");
 
                     if ((Convert.ToInt32((endDate - startDate).TotalDays) + 1) > 7)
-                        data = _dnsWebService.DnsServer.StatsManager.GetDayWiseStats(startDate, endDate);
+                    {
+                        data = _dnsWebService.DnsServer.StatsManager.GetDayWiseStats(startDate, endDate, utcFormat);
+                        labelFormat = "MM/DD";
+                    }
                     else
-                        data = _dnsWebService.DnsServer.StatsManager.GetHourWiseStats(startDate, endDate);
+                    {
+                        data = _dnsWebService.DnsServer.StatsManager.GetHourWiseStats(startDate, endDate, utcFormat);
+                        labelFormat = "MM/DD HH:00";
+                    }
 
                     break;
 
@@ -189,12 +208,12 @@ namespace DnsServerCore
 
             //stats
             {
-                List<KeyValuePair<string, int>> stats = data["stats"];
+                List<KeyValuePair<string, long>> stats = data["stats"];
 
                 jsonWriter.WritePropertyName("stats");
                 jsonWriter.WriteStartObject();
 
-                foreach (KeyValuePair<string, int> item in stats)
+                foreach (KeyValuePair<string, long> item in stats)
                 {
                     jsonWriter.WritePropertyName(item.Key);
                     jsonWriter.WriteValue(item.Value);
@@ -202,6 +221,9 @@ namespace DnsServerCore
 
                 jsonWriter.WritePropertyName("zones");
                 jsonWriter.WriteValue(_dnsWebService.DnsServer.AuthZoneManager.TotalZones);
+
+                jsonWriter.WritePropertyName("cachedEntries");
+                jsonWriter.WriteValue(_dnsWebService.DnsServer.CacheZoneManager.TotalEntries);
 
                 jsonWriter.WritePropertyName("allowedZones");
                 jsonWriter.WriteValue(_dnsWebService.DnsServer.AllowedZoneManager.TotalZonesAllowed);
@@ -220,14 +242,20 @@ namespace DnsServerCore
                 jsonWriter.WritePropertyName("mainChartData");
                 jsonWriter.WriteStartObject();
 
+                //label format
+                {
+                    jsonWriter.WritePropertyName("labelFormat");
+                    jsonWriter.WriteValue(labelFormat);
+                }
+
                 //label
                 {
-                    List<KeyValuePair<string, int>> statsPerInterval = data["totalQueriesPerInterval"];
+                    List<KeyValuePair<string, long>> statsPerInterval = data["totalQueriesPerInterval"];
 
                     jsonWriter.WritePropertyName("labels");
                     jsonWriter.WriteStartArray();
 
-                    foreach (KeyValuePair<string, int> item in statsPerInterval)
+                    foreach (KeyValuePair<string, long> item in statsPerInterval)
                         jsonWriter.WriteValue(item.Key);
 
                     jsonWriter.WriteEndArray();
@@ -262,14 +290,14 @@ namespace DnsServerCore
                 jsonWriter.WritePropertyName("queryResponseChartData");
                 jsonWriter.WriteStartObject();
 
-                List<KeyValuePair<string, int>> stats = data["stats"];
+                List<KeyValuePair<string, long>> stats = data["stats"];
 
                 //labels
                 {
                     jsonWriter.WritePropertyName("labels");
                     jsonWriter.WriteStartArray();
 
-                    foreach (KeyValuePair<string, int> item in stats)
+                    foreach (KeyValuePair<string, long> item in stats)
                     {
                         switch (item.Key)
                         {
@@ -304,7 +332,7 @@ namespace DnsServerCore
                     jsonWriter.WritePropertyName("data");
                     jsonWriter.WriteStartArray();
 
-                    foreach (KeyValuePair<string, int> item in stats)
+                    foreach (KeyValuePair<string, long> item in stats)
                     {
                         switch (item.Key)
                         {
@@ -340,14 +368,14 @@ namespace DnsServerCore
                 jsonWriter.WritePropertyName("queryTypeChartData");
                 jsonWriter.WriteStartObject();
 
-                List<KeyValuePair<string, int>> queryTypes = data["queryTypes"];
+                List<KeyValuePair<string, long>> queryTypes = data["queryTypes"];
 
                 //labels
                 {
                     jsonWriter.WritePropertyName("labels");
                     jsonWriter.WriteStartArray();
 
-                    foreach (KeyValuePair<string, int> item in queryTypes)
+                    foreach (KeyValuePair<string, long> item in queryTypes)
                         jsonWriter.WriteValue(item.Key);
 
                     jsonWriter.WriteEndArray();
@@ -362,7 +390,7 @@ namespace DnsServerCore
 
                     jsonWriter.WritePropertyName("data");
                     jsonWriter.WriteStartArray();
-                    foreach (KeyValuePair<string, int> item in queryTypes)
+                    foreach (KeyValuePair<string, long> item in queryTypes)
                         jsonWriter.WriteValue(item.Value);
                     jsonWriter.WriteEndArray();
 
@@ -390,14 +418,14 @@ namespace DnsServerCore
 
             //top clients
             {
-                List<KeyValuePair<string, int>> topClients = data["topClients"];
+                List<KeyValuePair<string, long>> topClients = data["topClients"];
 
                 IDictionary<string, string> clientIpMap = await ResolvePtrTopClientsAsync(topClients);
 
                 jsonWriter.WritePropertyName("topClients");
                 jsonWriter.WriteStartArray();
 
-                foreach (KeyValuePair<string, int> item in topClients)
+                foreach (KeyValuePair<string, long> item in topClients)
                 {
                     jsonWriter.WriteStartObject();
 
@@ -421,12 +449,12 @@ namespace DnsServerCore
 
             //top domains
             {
-                List<KeyValuePair<string, int>> topDomains = data["topDomains"];
+                List<KeyValuePair<string, long>> topDomains = data["topDomains"];
 
                 jsonWriter.WritePropertyName("topDomains");
                 jsonWriter.WriteStartArray();
 
-                foreach (KeyValuePair<string, int> item in topDomains)
+                foreach (KeyValuePair<string, long> item in topDomains)
                 {
                     jsonWriter.WriteStartObject();
 
@@ -444,12 +472,12 @@ namespace DnsServerCore
 
             //top blocked domains
             {
-                List<KeyValuePair<string, int>> topBlockedDomains = data["topBlockedDomains"];
+                List<KeyValuePair<string, long>> topBlockedDomains = data["topBlockedDomains"];
 
                 jsonWriter.WritePropertyName("topBlockedDomains");
                 jsonWriter.WriteStartArray();
 
-                foreach (KeyValuePair<string, int> item in topBlockedDomains)
+                foreach (KeyValuePair<string, long> item in topBlockedDomains)
                 {
                     jsonWriter.WriteStartObject();
 
@@ -480,10 +508,10 @@ namespace DnsServerCore
             if (string.IsNullOrEmpty(strLimit))
                 strLimit = "1000";
 
-            TopStatsType statsType = (TopStatsType)Enum.Parse(typeof(TopStatsType), strStatsType, true);
+            TopStatsType statsType = Enum.Parse<TopStatsType>(strStatsType, true);
             int limit = int.Parse(strLimit);
 
-            List<KeyValuePair<string, int>> topStatsData;
+            List<KeyValuePair<string, long>> topStatsData;
 
             switch (strType)
             {
@@ -545,7 +573,7 @@ namespace DnsServerCore
                         jsonWriter.WritePropertyName("topClients");
                         jsonWriter.WriteStartArray();
 
-                        foreach (KeyValuePair<string, int> item in topStatsData)
+                        foreach (KeyValuePair<string, long> item in topStatsData)
                         {
                             jsonWriter.WriteStartObject();
 
@@ -573,7 +601,7 @@ namespace DnsServerCore
                         jsonWriter.WritePropertyName("topDomains");
                         jsonWriter.WriteStartArray();
 
-                        foreach (KeyValuePair<string, int> item in topStatsData)
+                        foreach (KeyValuePair<string, long> item in topStatsData)
                         {
                             jsonWriter.WriteStartObject();
 
@@ -595,7 +623,7 @@ namespace DnsServerCore
                         jsonWriter.WritePropertyName("topBlockedDomains");
                         jsonWriter.WriteStartArray();
 
-                        foreach (KeyValuePair<string, int> item in topStatsData)
+                        foreach (KeyValuePair<string, long> item in topStatsData)
                         {
                             jsonWriter.WriteStartObject();
 

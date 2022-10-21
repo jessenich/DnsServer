@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -25,7 +25,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading.Tasks;
-using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 using TechnitiumLibrary.Net.Proxy;
 
 namespace Failover
@@ -102,6 +102,7 @@ namespace Failover
             {
                 SocketsHttpHandler httpHandler = new SocketsHttpHandler();
                 httpHandler.Proxy = proxy;
+                httpHandler.UseProxy = proxy is not null;
                 httpHandler.AllowAutoRedirect = true;
                 httpHandler.MaxAutomaticRedirections = 10;
 
@@ -114,6 +115,7 @@ namespace Failover
                 {
                     SocketsHttpHandler httpHandler = new SocketsHttpHandler();
                     httpHandler.Proxy = proxy;
+                    httpHandler.UseProxy = proxy is not null;
                     httpHandler.AllowAutoRedirect = true;
                     httpHandler.MaxAutomaticRedirections = 10;
 

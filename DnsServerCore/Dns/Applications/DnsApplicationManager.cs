@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -85,27 +85,24 @@ namespace DnsServerCore.Dns.Applications
 
         #region private
 
-        private async Task LoadApplicationAsync(string applicationFolder, bool refreshAppObjectList)
+        private async Task<DnsApplication> LoadApplicationAsync(string applicationFolder, bool refreshAppObjectList)
         {
             string applicationName = Path.GetFileName(applicationFolder);
 
             DnsApplication application = new DnsApplication(new DnsServerInternal(_dnsServer, applicationName, applicationFolder), applicationName);
 
-            try
-            {
-                await application.InitializeAsync();
+            await application.InitializeAsync();
 
-                if (!_applications.TryAdd(application.Name, application))
-                    throw new DnsServerException("DNS application already exists: " + application.Name);
-
-                if (refreshAppObjectList)
-                    RefreshAppObjectLists();
-            }
-            catch
+            if (!_applications.TryAdd(application.Name, application))
             {
                 application.Dispose();
-                throw;
+                throw new DnsServerException("DNS application already exists: " + application.Name);
             }
+
+            if (refreshAppObjectList)
+                RefreshAppObjectLists();
+
+            return application;
         }
 
         private void UnloadApplication(string applicationName)
@@ -177,7 +174,7 @@ namespace DnsServerCore.Dns.Applications
                 {
                     try
                     {
-                        await LoadApplicationAsync(applicationFolder, false);
+                        _ = await LoadApplicationAsync(applicationFolder, false);
                         RefreshAppObjectLists();
 
                         LogManager log = _dnsServer.LogManager;
@@ -194,8 +191,14 @@ namespace DnsServerCore.Dns.Applications
             }
         }
 
-        public async Task InstallApplicationAsync(string applicationName, Stream appStream)
+        public async Task<DnsApplication> InstallApplicationAsync(string applicationName, Stream appStream)
         {
+            foreach (char invalidChar in Path.GetInvalidFileNameChars())
+            {
+                if (applicationName.Contains(invalidChar))
+                    throw new DnsServerException("The application name contains an invalid character: " + invalidChar);
+            }
+
             if (_applications.ContainsKey(applicationName))
                 throw new DnsServerException("DNS application already exists: " + applicationName);
 
@@ -210,7 +213,7 @@ namespace DnsServerCore.Dns.Applications
                 {
                     appZip.ExtractToDirectory(applicationFolder, true);
 
-                    await LoadApplicationAsync(applicationFolder, true);
+                    return await LoadApplicationAsync(applicationFolder, true);
                 }
                 catch
                 {
@@ -222,7 +225,7 @@ namespace DnsServerCore.Dns.Applications
             }
         }
 
-        public async Task UpdateApplicationAsync(string applicationName, Stream appStream)
+        public async Task<DnsApplication> UpdateApplicationAsync(string applicationName, Stream appStream)
         {
             if (!_applications.ContainsKey(applicationName))
                 throw new DnsServerException("DNS application does not exists: " + applicationName);
@@ -250,7 +253,7 @@ namespace DnsServerCore.Dns.Applications
                     entry.ExtractToFile(filePath, true);
                 }
 
-                await LoadApplicationAsync(applicationFolder, true);
+                return await LoadApplicationAsync(applicationFolder, true);
             }
         }
 

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -42,11 +42,11 @@ namespace DnsServerCore.Dns.ZoneManagers
         readonly List<Uri> _blockListUrls = new List<Uri>();
         IReadOnlyDictionary<string, List<Uri>> _blockListZone = new Dictionary<string, List<Uri>>();
 
-        DnsSOARecord _soaRecord;
-        DnsNSRecord _nsRecord;
+        DnsSOARecordData _soaRecord;
+        DnsNSRecordData _nsRecord;
 
-        readonly IReadOnlyCollection<DnsARecord> _aRecords = new DnsARecord[] { new DnsARecord(IPAddress.Any) };
-        readonly IReadOnlyCollection<DnsAAAARecord> _aaaaRecords = new DnsAAAARecord[] { new DnsAAAARecord(IPAddress.IPv6Any) };
+        readonly IReadOnlyCollection<DnsARecordData> _aRecords = new DnsARecordData[] { new DnsARecordData(IPAddress.Any) };
+        readonly IReadOnlyCollection<DnsAAAARecordData> _aaaaRecords = new DnsAAAARecordData[] { new DnsAAAARecordData(IPAddress.IPv6Any) };
 
         #endregion
 
@@ -70,15 +70,15 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         private void UpdateServerDomain(string serverDomain)
         {
-            _soaRecord = new DnsSOARecord(serverDomain, "hostadmin." + serverDomain, 1, 14400, 3600, 604800, 60);
-            _nsRecord = new DnsNSRecord(serverDomain);
+            _soaRecord = new DnsSOARecordData(serverDomain, "hostadmin@" + serverDomain, 1, 14400, 3600, 604800, 60);
+            _nsRecord = new DnsNSRecordData(serverDomain);
         }
 
         private string GetBlockListFilePath(Uri blockListUrl)
         {
             using (HashAlgorithm hash = SHA256.Create())
             {
-                return Path.Combine(_localCacheFolder, BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(blockListUrl.AbsoluteUri))).Replace("-", "").ToLower());
+                return Path.Combine(_localCacheFolder, Convert.ToHexString(hash.ComputeHash(Encoding.UTF8.GetBytes(blockListUrl.AbsoluteUri))).ToLower());
             }
         }
 
@@ -197,16 +197,6 @@ namespace DnsServerCore.Dns.ZoneManagers
             return domains;
         }
 
-        internal static string GetParentZone(string domain)
-        {
-            int i = domain.IndexOf('.');
-            if (i > -1)
-                return domain.Substring(i + 1);
-
-            //dont return root zone
-            return null;
-        }
-
         private List<Uri> IsZoneBlocked(string domain, out string blockedDomain)
         {
             domain = domain.ToLower();
@@ -220,7 +210,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     return blockLists;
                 }
 
-                domain = GetParentZone(domain);
+                domain = AuthZoneManager.GetParentZone(domain);
             }
             while (domain is not null);
 
@@ -235,7 +225,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 if (allowedDomains.TryGetValue(domain, out _))
                     return true;
 
-                domain = GetParentZone(domain);
+                domain = AuthZoneManager.GetParentZone(domain);
             }
             while (domain is not null);
 
@@ -331,6 +321,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                     SocketsHttpHandler handler = new SocketsHttpHandler();
                     handler.Proxy = _dnsServer.Proxy;
+                    handler.UseProxy = _dnsServer.Proxy is not null;
                     handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
 
                     using (HttpClient http = new HttpClient(handler))
@@ -426,14 +417,14 @@ namespace DnsServerCore.Dns.ZoneManagers
                 DnsResourceRecord[] answer = new DnsResourceRecord[blockLists.Count];
 
                 for (int i = 0; i < answer.Length; i++)
-                    answer[i] = new DnsResourceRecord(question.Name, DnsResourceRecordType.TXT, question.Class, 60, new DnsTXTRecord("source=block-list-zone; blockListUrl=" + blockLists[i].AbsoluteUri + "; domain=" + blockedDomain));
+                    answer[i] = new DnsResourceRecord(question.Name, DnsResourceRecordType.TXT, question.Class, 60, new DnsTXTRecordData("source=block-list-zone; blockListUrl=" + blockLists[i].AbsoluteUri + "; domain=" + blockedDomain));
 
                 return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NoError, request.Question, answer);
             }
             else
             {
-                IReadOnlyCollection<DnsARecord> aRecords;
-                IReadOnlyCollection<DnsAAAARecord> aaaaRecords;
+                IReadOnlyCollection<DnsARecordData> aRecords;
+                IReadOnlyCollection<DnsAAAARecordData> aaaaRecords;
 
                 switch (_dnsServer.BlockingType)
                 {
@@ -448,7 +439,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         break;
 
                     case DnsServerBlockingType.NxDomain:
-                        string parentDomain = GetParentZone(blockedDomain);
+                        string parentDomain = AuthZoneManager.GetParentZone(blockedDomain);
                         if (parentDomain is null)
                             parentDomain = string.Empty;
 
@@ -467,7 +458,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         {
                             List<DnsResourceRecord> rrList = new List<DnsResourceRecord>(aRecords.Count);
 
-                            foreach (DnsARecord record in aRecords)
+                            foreach (DnsARecordData record in aRecords)
                                 rrList.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.A, question.Class, 60, record));
 
                             answer = rrList;
@@ -478,7 +469,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         {
                             List<DnsResourceRecord> rrList = new List<DnsResourceRecord>(aaaaRecords.Count);
 
-                            foreach (DnsAAAARecord record in aaaaRecords)
+                            foreach (DnsAAAARecordData record in aaaaRecords)
                                 rrList.Add(new DnsResourceRecord(question.Name, DnsResourceRecordType.AAAA, question.Class, 60, record));
 
                             answer = rrList;
@@ -491,6 +482,10 @@ namespace DnsServerCore.Dns.ZoneManagers
                         else
                             authority = new DnsResourceRecord[] { new DnsResourceRecord(blockedDomain, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) };
 
+                        break;
+
+                    case DnsResourceRecordType.SOA:
+                        answer = new DnsResourceRecord[] { new DnsResourceRecord(blockedDomain, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) };
                         break;
 
                     default:

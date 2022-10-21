@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -29,6 +29,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using TechnitiumLibrary;
 using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
@@ -72,6 +73,7 @@ namespace DnsServerCore.Dhcp
         IReadOnlyCollection<Exclusion> _exclusions;
         readonly ConcurrentDictionary<ClientIdentifierOption, Lease> _reservedLeases = new ConcurrentDictionary<ClientIdentifierOption, Lease>();
         bool _allowOnlyReservedLeases;
+        bool _blockLocallyAdministeredMacAddresses;
 
         //leases
         readonly ConcurrentDictionary<ClientIdentifierOption, Lease> _leases = new ConcurrentDictionary<ClientIdentifierOption, Lease>();
@@ -95,6 +97,8 @@ namespace DnsServerCore.Dhcp
 
         public Scope(string name, bool enabled, IPAddress startingAddress, IPAddress endingAddress, IPAddress subnetMask)
         {
+            ValidateScopeName(name);
+
             _name = name;
             _enabled = enabled;
 
@@ -114,10 +118,11 @@ namespace DnsServerCore.Dhcp
                 case 3:
                 case 4:
                 case 5:
+                case 6:
                     _name = bR.ReadShortString();
                     _enabled = bR.ReadBoolean();
 
-                    ChangeNetwork(IPAddressExtension.Parse(bR), IPAddressExtension.Parse(bR), IPAddressExtension.Parse(bR));
+                    ChangeNetwork(IPAddressExtension.ReadFrom(bR), IPAddressExtension.ReadFrom(bR), IPAddressExtension.ReadFrom(bR));
 
                     _leaseTimeDays = bR.ReadUInt16();
                     _leaseTimeHours = bR.ReadByte();
@@ -140,7 +145,7 @@ namespace DnsServerCore.Dhcp
 
                     if (version >= 2)
                     {
-                        _serverAddress = IPAddressExtension.Parse(bR);
+                        _serverAddress = IPAddressExtension.ReadFrom(bR);
                         if (_serverAddress.Equals(IPAddress.Any))
                             _serverAddress = null;
                     }
@@ -156,7 +161,7 @@ namespace DnsServerCore.Dhcp
                             _bootFileName = null;
                     }
 
-                    _routerAddress = IPAddressExtension.Parse(bR);
+                    _routerAddress = IPAddressExtension.ReadFrom(bR);
                     if (_routerAddress.Equals(IPAddress.Any))
                         _routerAddress = null;
 
@@ -174,7 +179,7 @@ namespace DnsServerCore.Dhcp
                                 IPAddress[] dnsServers = new IPAddress[count];
 
                                 for (int i = 0; i < count; i++)
-                                    dnsServers[i] = IPAddressExtension.Parse(bR);
+                                    dnsServers[i] = IPAddressExtension.ReadFrom(bR);
 
                                 _dnsServers = dnsServers;
                             }
@@ -188,7 +193,7 @@ namespace DnsServerCore.Dhcp
                             IPAddress[] winsServers = new IPAddress[count];
 
                             for (int i = 0; i < count; i++)
-                                winsServers[i] = IPAddressExtension.Parse(bR);
+                                winsServers[i] = IPAddressExtension.ReadFrom(bR);
 
                             _winsServers = winsServers;
                         }
@@ -201,7 +206,7 @@ namespace DnsServerCore.Dhcp
                             IPAddress[] ntpServers = new IPAddress[count];
 
                             for (int i = 0; i < count; i++)
-                                ntpServers[i] = IPAddressExtension.Parse(bR);
+                                ntpServers[i] = IPAddressExtension.ReadFrom(bR);
 
                             _ntpServers = ntpServers;
                         }
@@ -246,7 +251,7 @@ namespace DnsServerCore.Dhcp
                             Exclusion[] exclusions = new Exclusion[count];
 
                             for (int i = 0; i < count; i++)
-                                exclusions[i] = new Exclusion(IPAddressExtension.Parse(bR), IPAddressExtension.Parse(bR));
+                                exclusions[i] = new Exclusion(IPAddressExtension.ReadFrom(bR), IPAddressExtension.ReadFrom(bR));
 
                             _exclusions = exclusions;
                         }
@@ -265,6 +270,11 @@ namespace DnsServerCore.Dhcp
 
                         _allowOnlyReservedLeases = bR.ReadBoolean();
                     }
+
+                    if (version >= 6)
+                        _blockLocallyAdministeredMacAddresses = bR.ReadBoolean();
+                    else
+                        _blockLocallyAdministeredMacAddresses = false;
 
                     {
                         int count = bR.ReadInt32();
@@ -306,6 +316,15 @@ namespace DnsServerCore.Dhcp
         #endregion
 
         #region static
+
+        public static void ValidateScopeName(string name)
+        {
+            foreach (char invalidChar in Path.GetInvalidFileNameChars())
+            {
+                if (name.Contains(invalidChar))
+                    throw new DhcpServerException("The scope name contains an invalid character: " + invalidChar);
+            }
+        }
 
         public static bool IsAddressInRange(IPAddress address, IPAddress startingAddress, IPAddress endingAddress)
         {
@@ -389,18 +408,18 @@ namespace DnsServerCore.Dhcp
             return AddressStatus.TRUE;
         }
 
-        private bool IsAddressAlreadyAllocated(Lease reservedLease)
+        private bool IsAddressAlreadyAllocated(IPAddress address, ClientIdentifierOption clientIdentifier)
         {
             foreach (KeyValuePair<ClientIdentifierOption, Lease> lease in _leases)
             {
-                if (reservedLease.Address.Equals(lease.Value.Address))
-                    return !lease.Key.Equals(reservedLease.ClientIdentifier);
+                if (address.Equals(lease.Value.Address))
+                    return !lease.Key.Equals(clientIdentifier);
             }
 
             foreach (KeyValuePair<ClientIdentifierOption, Lease> offer in _offers)
             {
-                if (reservedLease.Address.Equals(offer.Value.Address))
-                    return !offer.Key.Equals(reservedLease.ClientIdentifier);
+                if (address.Equals(offer.Value.Address))
+                    return !offer.Key.Equals(clientIdentifier);
             }
 
             return false;
@@ -443,7 +462,7 @@ namespace DnsServerCore.Dhcp
 
                 clientDomainName = request.HostName.HostName + "." + _domainName;
             }
-            else if (request.ClientFullyQualifiedDomainName.DomainName.Contains("."))
+            else if (request.ClientFullyQualifiedDomainName.DomainName.Contains('.'))
             {
                 //client domain is fqdn
                 if (request.ClientFullyQualifiedDomainName.DomainName.EndsWith("." + _domainName, StringComparison.OrdinalIgnoreCase))
@@ -463,6 +482,58 @@ namespace DnsServerCore.Dhcp
             }
 
             return new ClientFullyQualifiedDomainNameOption(responseFlags, 255, 255, clientDomainName);
+        }
+
+        private void ConvertToReservedLease(Lease lease)
+        {
+            //convert dynamic to reserved lease
+            lease.ConvertToReserved();
+
+            //add reserved lease
+            Lease reservedLease = new Lease(LeaseType.Reserved, null, DhcpMessageHardwareAddressType.Ethernet, lease.HardwareAddress, lease.Address, null);
+            _reservedLeases[reservedLease.ClientIdentifier] = reservedLease;
+        }
+
+        private void ConvertToDynamicLease(Lease lease)
+        {
+            //convert reserved to dynamic lease
+            lease.ConvertToDynamic();
+
+            //remove reserved lease
+            Lease reservedLease = new Lease(LeaseType.Reserved, null, DhcpMessageHardwareAddressType.Ethernet, lease.HardwareAddress, lease.Address, null);
+            _reservedLeases.TryRemove(reservedLease.ClientIdentifier, out _);
+
+            //remove any old single address exclusion entry
+            if (_exclusions != null)
+            {
+                foreach (Exclusion exclusion in _exclusions)
+                {
+                    if (exclusion.StartingAddress.Equals(lease.Address) && exclusion.EndingAddress.Equals(lease.Address))
+                    {
+                        //remove single address exclusion entry
+                        if (_exclusions.Count == 1)
+                        {
+                            _exclusions = null;
+                        }
+                        else
+                        {
+                            List<Exclusion> exclusions = new List<Exclusion>();
+
+                            foreach (Exclusion exc in _exclusions)
+                            {
+                                if (exc.Equals(exclusion))
+                                    continue;
+
+                                exclusions.Add(exc);
+                            }
+
+                            _exclusions = exclusions;
+                        }
+
+                        break;
+                    }
+                }
+            }
         }
 
         #endregion
@@ -492,11 +563,19 @@ namespace DnsServerCore.Dhcp
                         {
                             //found interface for this scope range
 
-                            //check if interface has dynamic ipv4 address assigned via dhcp
-                            foreach (IPAddress dhcpServerAddress in ipInterface.DhcpServerAddresses)
+                            try
                             {
-                                if (dhcpServerAddress.AddressFamily == AddressFamily.InterNetwork)
-                                    throw new DhcpServerException("DHCP Server requires static IP address to work correctly but the network interface was found to have a dynamic IP address [" + ip.Address.ToString() + "] assigned by another DHCP server: " + dhcpServerAddress.ToString());
+                                //check if interface has dynamic ipv4 address assigned via dhcp
+                                foreach (IPAddress dhcpServerAddress in ipInterface.DhcpServerAddresses)
+                                {
+                                    if (dhcpServerAddress.AddressFamily == AddressFamily.InterNetwork)
+                                        throw new DhcpServerException("DHCP Server requires static IP address to work correctly but the network interface was found to have a dynamic IP address [" + ip.Address.ToString() + "] assigned by another DHCP server: " + dhcpServerAddress.ToString());
+                                }
+                            }
+                            catch (PlatformNotSupportedException)
+                            {
+                                //DhcpServerAddresses() not supported on macOs
+                                //ignore the exception
                             }
 
                             _interfaceAddress = ip.Address;
@@ -507,29 +586,37 @@ namespace DnsServerCore.Dhcp
                 }
             }
 
-            //check if at least one interface has static ip address
-            foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+            try
             {
-                if (nic.OperationalStatus != OperationalStatus.Up)
-                    continue;
-
-                IPInterfaceProperties ipInterface = nic.GetIPProperties();
-
-                foreach (UnicastIPAddressInformation ip in ipInterface.UnicastAddresses)
+                //check if at least one interface has static ip address
+                foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
                 {
-                    if (ip.Address.AddressFamily == AddressFamily.InterNetwork)
+                    if (nic.OperationalStatus != OperationalStatus.Up)
+                        continue;
+
+                    IPInterfaceProperties ipInterface = nic.GetIPProperties();
+
+                    foreach (UnicastIPAddressInformation ip in ipInterface.UnicastAddresses)
                     {
-                        //check if address is static
-                        if (ipInterface.DhcpServerAddresses.Count < 1)
+                        if (ip.Address.AddressFamily == AddressFamily.InterNetwork)
                         {
-                            //found static ip address so this scope can be activated
-                            //using ANY ip address for this scope interface since we dont know the relay agent network 
-                            _interfaceAddress = IPAddress.Any;
-                            _interfaceIndex = -1;
-                            return true;
+                            //check if address is static
+                            if (ipInterface.DhcpServerAddresses.Count < 1)
+                            {
+                                //found static ip address so this scope can be activated
+                                //using ANY ip address for this scope interface since we dont know the relay agent network 
+                                _interfaceAddress = IPAddress.Any;
+                                _interfaceIndex = -1;
+                                return true;
+                            }
                         }
                     }
                 }
+            }
+            catch (PlatformNotSupportedException)
+            {
+                //DhcpServerAddresses() not supported on macOs
+                //ignore the exception
             }
 
             //server has no static ip address configured
@@ -653,20 +740,15 @@ namespace DnsServerCore.Dhcp
 
         internal Lease GetReservedLease(DhcpMessage request)
         {
-            return GetReservedLease(new ClientIdentifierOption((byte)request.HardwareAddressType, request.ClientHardwareAddress));
+            return GetReservedLease(new ClientIdentifierOption((byte)request.HardwareAddressType, request.ClientHardwareAddress), request.ClientIdentifier);
         }
 
-        internal Lease GetReservedLease(DhcpMessageHardwareAddressType hardwareAddressType, byte[] identifier)
+        private Lease GetReservedLease(ClientIdentifierOption reservedLeasesClientIdentifier, ClientIdentifierOption clientIdentifier)
         {
-            return GetReservedLease(new ClientIdentifierOption((byte)hardwareAddressType, identifier));
-        }
-
-        private Lease GetReservedLease(ClientIdentifierOption clientIdentifier)
-        {
-            if (_reservedLeases.TryGetValue(clientIdentifier, out Lease reservedLease))
+            if (_reservedLeases.TryGetValue(reservedLeasesClientIdentifier, out Lease reservedLease))
             {
                 //reserved address exists
-                if (IsAddressAlreadyAllocated(reservedLease))
+                if (IsAddressAlreadyAllocated(reservedLease.Address, clientIdentifier))
                     return null; //reserved lease address is already allocated so ignore reserved lease
 
                 return reservedLease;
@@ -680,11 +762,28 @@ namespace DnsServerCore.Dhcp
             if (_leases.TryGetValue(request.ClientIdentifier, out Lease existingLease))
             {
                 //lease already exists
-                if ((existingLease.Type == LeaseType.Reserved) || !IsAddressExcluded(existingLease.Address))
-                    return existingLease; //existing lease is reserved or dynamic allocation is not excluded
+                if (existingLease.Type == LeaseType.Reserved)
+                {
+                    Lease existingReservedLease = GetReservedLease(request);
+                    if ((existingReservedLease is not null) && (existingReservedLease.Address == existingLease.Address))
+                        return existingLease; //return existing reserved lease
 
-                //remove existing dynamic lease
-                ReleaseLease(existingLease);
+                    //reserved lease address was changed; proceed to offer new lease
+                }
+                else
+                {
+                    //is dynamic lease
+                    if (IsAddressExcluded(existingLease.Address))
+                    {
+                        //remove existing dynamic lease; proceed to offer new lease
+                        ReleaseLease(existingLease);
+                    }
+                    else
+                    {
+                        //return existing dynamic lease
+                        return existingLease;
+                    }
+                }
             }
 
             Lease reservedLease = GetReservedLease(request);
@@ -697,6 +796,12 @@ namespace DnsServerCore.Dhcp
 
             if (_allowOnlyReservedLeases)
                 throw new DhcpServerException("DHCP Server failed to offer IP address to " + request.GetClientFullIdentifier() + ": scope allows only reserved lease allocations.");
+
+            if (_blockLocallyAdministeredMacAddresses)
+            {
+                if ((request.HardwareAddressType == DhcpMessageHardwareAddressType.Ethernet) && ((request.ClientHardwareAddress[0] & 0x02) > 0))
+                    throw new DhcpServerException("DHCP Server failed to offer IP address to " + request.GetClientFullIdentifier() + ": scope does not allow locally administered MAC addresses.");
+            }
 
             Lease dummyOffer = new Lease(LeaseType.None, null, null, null, null, null, 0);
             Lease existingOffer = _offers.GetOrAdd(request.ClientIdentifier, dummyOffer);
@@ -776,11 +881,12 @@ namespace DnsServerCore.Dhcp
 
         internal Lease GetExistingLeaseOrOffer(DhcpMessage request)
         {
-            if (_leases.TryGetValue(request.ClientIdentifier, out Lease existingLease))
-                return existingLease;
-
+            //check for lease offer first since it may have a different IP address to offer
             if (_offers.TryGetValue(request.ClientIdentifier, out Lease existingOffer))
                 return existingOffer;
+
+            if (_leases.TryGetValue(request.ClientIdentifier, out Lease existingLease))
+                return existingLease;
 
             return null;
         }
@@ -903,9 +1009,7 @@ namespace DnsServerCore.Dhcp
 
             if ((_vendorInfo != null) && (request.VendorClassIdentifier != null))
             {
-                VendorSpecificInformationOption vendorSpecificInformationOption;
-
-                if (_vendorInfo.TryGetValue(request.VendorClassIdentifier.Identifier, out vendorSpecificInformationOption) || _vendorInfo.TryGetValue("", out vendorSpecificInformationOption))
+                if (_vendorInfo.TryGetValue(request.VendorClassIdentifier.Identifier, out VendorSpecificInformationOption vendorSpecificInformationOption) || _vendorInfo.TryGetValue("", out vendorSpecificInformationOption))
                 {
                     options.Add(new VendorClassIdentifierOption(request.VendorClassIdentifier.Identifier));
                     options.Add(vendorSpecificInformationOption);
@@ -972,32 +1076,6 @@ namespace DnsServerCore.Dhcp
             _leases.TryRemove(lease.ClientIdentifier, out _);
 
             _lastModified = DateTime.UtcNow;
-        }
-
-        internal Lease RemoveLease(string hardwareAddress)
-        {
-            byte[] hardwareAddressBytes = Lease.ParseHardwareAddress(hardwareAddress);
-
-            foreach (KeyValuePair<ClientIdentifierOption, Lease> entry in _leases)
-            {
-                if (BinaryNumber.Equals(entry.Value.HardwareAddress, hardwareAddressBytes))
-                {
-                    //remove lease
-                    if (_leases.TryRemove(entry.Key, out Lease removedLease))
-                    {
-                        if (removedLease.Type == LeaseType.Reserved)
-                        {
-                            //remove reserved lease
-                            Lease reservedLease = new Lease(LeaseType.Reserved, null, DhcpMessageHardwareAddressType.Ethernet, removedLease.HardwareAddress, removedLease.Address, null);
-                            _reservedLeases.TryRemove(reservedLease.ClientIdentifier, out _);
-                        }
-
-                        return removedLease;
-                    }
-                }
-            }
-
-            throw new DhcpServerException("No lease was found for hardware address: " + hardwareAddress);
         }
 
         internal void SetEnabled(bool enabled)
@@ -1096,6 +1174,52 @@ namespace DnsServerCore.Dhcp
             }
         }
 
+        public bool AddReservedLease(Lease reservedLease)
+        {
+            return _reservedLeases.TryAdd(reservedLease.ClientIdentifier, reservedLease);
+        }
+
+        public bool RemoveReservedLease(string hardwareAddress)
+        {
+            byte[] hardwareAddressBytes = Lease.ParseHardwareAddress(hardwareAddress);
+            ClientIdentifierOption reservedLeaseClientIdentifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, hardwareAddressBytes);
+
+            return _reservedLeases.TryRemove(reservedLeaseClientIdentifier, out _);
+        }
+
+        public Lease RemoveLease(string hardwareAddress)
+        {
+            byte[] hardwareAddressBytes = Lease.ParseHardwareAddress(hardwareAddress);
+
+            foreach (KeyValuePair<ClientIdentifierOption, Lease> entry in _leases)
+            {
+                if (BinaryNumber.Equals(entry.Value.HardwareAddress, hardwareAddressBytes))
+                    return RemoveLease(entry.Key);
+            }
+
+            throw new DhcpServerException("No lease was found for hardware address: " + hardwareAddress);
+        }
+
+        public Lease RemoveLease(ClientIdentifierOption clientIdentifier)
+        {
+            if (!_leases.TryRemove(clientIdentifier, out Lease removedLease))
+                throw new DhcpServerException("No lease was found for client identifier: " + clientIdentifier.ToString());
+
+            if (removedLease.Type == LeaseType.Reserved)
+            {
+                //remove reserved lease
+                ClientIdentifierOption reservedLeaseClientIdentifier = new ClientIdentifierOption((byte)DhcpMessageHardwareAddressType.Ethernet, removedLease.HardwareAddress);
+                if (_reservedLeases.TryGetValue(reservedLeaseClientIdentifier, out Lease existingReservedLease))
+                {
+                    //remove reserved lease only if the IP addresses match
+                    if (existingReservedLease.Address.Equals(removedLease.Address))
+                        _reservedLeases.TryRemove(reservedLeaseClientIdentifier, out _);
+                }
+            }
+
+            return removedLease;
+        }
+
         public void ConvertToReservedLease(string hardwareAddress)
         {
             byte[] hardwareAddressBytes = Lease.ParseHardwareAddress(hardwareAddress);
@@ -1106,17 +1230,20 @@ namespace DnsServerCore.Dhcp
 
                 if ((lease.Type == LeaseType.Dynamic) && BinaryNumber.Equals(lease.HardwareAddress, hardwareAddressBytes))
                 {
-                    //convert dynamic to reserved lease
-                    lease.ConvertToReserved();
-
-                    //add reserved lease
-                    Lease reservedLease = new Lease(LeaseType.Reserved, null, DhcpMessageHardwareAddressType.Ethernet, lease.HardwareAddress, lease.Address, null);
-                    _reservedLeases[reservedLease.ClientIdentifier] = reservedLease;
+                    ConvertToReservedLease(lease);
                     return;
                 }
             }
 
             throw new DhcpServerException("No dynamic lease was found for hardware address: " + hardwareAddress);
+        }
+
+        public void ConvertToReservedLease(ClientIdentifierOption clientIdentifier)
+        {
+            if (!_leases.TryGetValue(clientIdentifier, out Lease lease) || (lease.Type != LeaseType.Dynamic))
+                throw new DhcpServerException("No dynamic lease was found for client identifier: " + clientIdentifier.ToString());
+
+            ConvertToReservedLease(lease);
         }
 
         public void ConvertToDynamicLease(string hardwareAddress)
@@ -1129,52 +1256,26 @@ namespace DnsServerCore.Dhcp
 
                 if ((lease.Type == LeaseType.Reserved) && BinaryNumber.Equals(lease.HardwareAddress, hardwareAddressBytes))
                 {
-                    //convert reserved to dynamic lease
-                    lease.ConvertToDynamic();
-
-                    //remove reserved lease
-                    Lease reservedLease = new Lease(LeaseType.Reserved, null, DhcpMessageHardwareAddressType.Ethernet, lease.HardwareAddress, lease.Address, null);
-                    _reservedLeases.TryRemove(reservedLease.ClientIdentifier, out _);
-
-                    //remove any old single address exclusion entry
-                    if (_exclusions != null)
-                    {
-                        foreach (Exclusion exclusion in _exclusions)
-                        {
-                            if (exclusion.StartingAddress.Equals(lease.Address) && exclusion.EndingAddress.Equals(lease.Address))
-                            {
-                                //remove single address exclusion entry
-                                if (_exclusions.Count == 1)
-                                {
-                                    _exclusions = null;
-                                }
-                                else
-                                {
-                                    List<Exclusion> exclusions = new List<Exclusion>();
-
-                                    foreach (Exclusion exc in _exclusions)
-                                    {
-                                        if (exc.Equals(exclusion))
-                                            continue;
-
-                                        exclusions.Add(exc);
-                                    }
-
-                                    _exclusions = exclusions;
-                                }
-
-                                break;
-                            }
-                        }
-                    }
+                    ConvertToDynamicLease(lease);
+                    return;
                 }
             }
+
+            throw new DhcpServerException("No reserved lease was found for hardware address: " + hardwareAddress);
+        }
+
+        public void ConvertToDynamicLease(ClientIdentifierOption clientIdentifier)
+        {
+            if (!_leases.TryGetValue(clientIdentifier, out Lease lease) || (lease.Type != LeaseType.Reserved))
+                throw new DhcpServerException("No reserved lease was found for client identifier: " + clientIdentifier.ToString());
+
+            ConvertToDynamicLease(lease);
         }
 
         public void WriteTo(BinaryWriter bW)
         {
             bW.Write(Encoding.ASCII.GetBytes("SC"));
-            bW.Write((byte)5); //version
+            bW.Write((byte)6); //version
 
             bW.WriteShortString(_name);
             bW.Write(_enabled);
@@ -1305,6 +1406,7 @@ namespace DnsServerCore.Dhcp
                 reservedLease.Value.WriteTo(bW);
 
             bW.Write(_allowOnlyReservedLeases);
+            bW.Write(_blockLocallyAdministeredMacAddresses);
 
             {
                 bW.Write(_leases.Count);
@@ -1361,7 +1463,11 @@ namespace DnsServerCore.Dhcp
         public string Name
         {
             get { return _name; }
-            set { _name = value; }
+            set
+            {
+                ValidateScopeName(value);
+                _name = value;
+            }
         }
 
         public bool Enabled
@@ -1601,6 +1707,12 @@ namespace DnsServerCore.Dhcp
         {
             get { return _allowOnlyReservedLeases; }
             set { _allowOnlyReservedLeases = value; }
+        }
+
+        public bool BlockLocallyAdministeredMacAddresses
+        {
+            get { return _blockLocallyAdministeredMacAddresses; }
+            set { _blockLocallyAdministeredMacAddresses = value; }
         }
 
         public IReadOnlyDictionary<ClientIdentifierOption, Lease> Leases

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -36,8 +36,8 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         readonly AuthZoneManager _zoneManager;
 
-        DnsSOARecord _soaRecord;
-        DnsNSRecord _nsRecord;
+        DnsSOARecordData _soaRecord;
+        DnsNSRecordData _nsRecord;
 
         #endregion
 
@@ -58,8 +58,8 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         private void UpdateServerDomain(string serverDomain)
         {
-            _soaRecord = new DnsSOARecord(serverDomain, "hostadmin." + serverDomain, 1, 14400, 3600, 604800, 60);
-            _nsRecord = new DnsNSRecord(serverDomain);
+            _soaRecord = new DnsSOARecordData(serverDomain, "hostadmin@" + serverDomain, 1, 900, 300, 604800, 60);
+            _nsRecord = new DnsNSRecordData(serverDomain);
 
             _zoneManager.ServerDomain = serverDomain;
         }
@@ -150,6 +150,11 @@ namespace DnsServerCore.Dns.ZoneManagers
             return false;
         }
 
+        public void Flush()
+        {
+            _zoneManager.Flush();
+        }
+
         public List<AuthZoneInfo> ListZones()
         {
             return _zoneManager.ListZones();
@@ -163,11 +168,6 @@ namespace DnsServerCore.Dns.ZoneManagers
         public void ListSubDomains(string domain, List<string> subDomains)
         {
             _zoneManager.ListSubDomains(domain, subDomains);
-        }
-
-        public IReadOnlyList<DnsResourceRecord> QueryRecords(string domain, DnsResourceRecordType type)
-        {
-            return _zoneManager.QueryRecords(domain, type);
         }
 
         public void SaveZoneFile()
@@ -203,7 +203,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         #region properties
 
-        internal DnsSOARecord DnsSOARecord
+        internal DnsSOARecordData DnsSOARecord
         { get { return _soaRecord; } }
 
         public string ServerDomain

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -34,13 +34,13 @@ function refreshDhcpLeases() {
     divDhcpLeasesLoader.show();
 
     HTTPRequest({
-        url: "/api/listDhcpLeases?token=" + token,
+        url: "/api/dhcp/leases/list?token=" + sessionData.token,
         success: function (responseJSON) {
             var dhcpLeases = responseJSON.response.leases;
             var tableHtmlRows = "";
 
             for (var i = 0; i < dhcpLeases.length; i++) {
-                tableHtmlRows += "<tr><td>" + htmlEncode(dhcpLeases[i].scope) + "</td><td>" +
+                tableHtmlRows += "<tr id=\"trDhcpLeaseRow" + i + "\"><td>" + htmlEncode(dhcpLeases[i].scope) + "</td><td>" +
                     dhcpLeases[i].hardwareAddress + "</td><td>" +
                     dhcpLeases[i].address + "</td><td><span id=\"spanDhcpLeaseType" + i + "\" class=\"label label-" +
                     (dhcpLeases[i].type === "Reserved" ? "default" : "primary") + "\">" + dhcpLeases[i].type + "</span></td><td>" +
@@ -49,9 +49,9 @@ function refreshDhcpLeases() {
                     moment(dhcpLeases[i].leaseExpires).local().format("YYYY-MM-DD HH:mm");
 
                 tableHtmlRows += "</td><td><div class=\"dropdown\"><a href=\"#\" id=\"btnDhcpLeaseRowOption" + i + "\" class=\"dropdown-toggle\" data-toggle=\"dropdown\" aria-haspopup=\"true\" aria-expanded=\"true\"><span class=\"glyphicon glyphicon-option-vertical\" aria-hidden=\"true\"></span></a><ul class=\"dropdown-menu dropdown-menu-right\">";
-                tableHtmlRows += "<li id=\"btnDhcpLeaseReserve" + i + "\" style=\"" + (dhcpLeases[i].type === "Dynamic" ? "" : "display: none;") + "\"><a href=\"#\" onclick=\"convertToReservedLease(" + i + ", '" + dhcpLeases[i].scope + "', '" + dhcpLeases[i].hardwareAddress + "'); return false;\">Convert To Reserved Lease</a></li>";
-                tableHtmlRows += "<li id=\"btnDhcpLeaseUnreserve" + i + "\" style=\"" + (dhcpLeases[i].type === "Dynamic" ? "display: none;" : "") + "\"><a href=\"#\" onclick=\"convertToDynamicLease(" + i + ", '" + dhcpLeases[i].scope + "', '" + dhcpLeases[i].hardwareAddress + "'); return false;\">Convert To Dynamic Lease</a></li>";
-                tableHtmlRows += "<li><a href=\"#\" onclick=\"showRemoveLease('" + dhcpLeases[i].scope + "', '" + dhcpLeases[i].hardwareAddress + "'); return false;\">Remove Lease</a></li>";
+                tableHtmlRows += "<li id=\"btnDhcpLeaseReserve" + i + "\" style=\"" + (dhcpLeases[i].type === "Dynamic" ? "" : "display: none;") + "\"><a href=\"#\" onclick=\"convertToReservedLease(" + i + ", '" + dhcpLeases[i].scope + "', '" + dhcpLeases[i].clientIdentifier + "'); return false;\">Convert To Reserved Lease</a></li>";
+                tableHtmlRows += "<li id=\"btnDhcpLeaseUnreserve" + i + "\" style=\"" + (dhcpLeases[i].type === "Dynamic" ? "display: none;" : "") + "\"><a href=\"#\" onclick=\"convertToDynamicLease(" + i + ", '" + dhcpLeases[i].scope + "', '" + dhcpLeases[i].clientIdentifier + "'); return false;\">Convert To Dynamic Lease</a></li>";
+                tableHtmlRows += "<li><a href=\"#\" onclick=\"showRemoveLeaseModal(" + i + ", '" + dhcpLeases[i].scope + "', '" + dhcpLeases[i].clientIdentifier + "'); return false;\">Remove Lease</a></li>";
                 tableHtmlRows += "</ul></div></td></tr>";
             }
 
@@ -72,22 +72,25 @@ function refreshDhcpLeases() {
     });
 }
 
-function convertToReservedLease(index, scopeName, hardwareAddress) {
+function convertToReservedLease(id, scopeName, clientIdentifier) {
     if (!confirm("Are you sure you want to convert the dynamic lease to reserved lease?"))
         return;
 
-    var btn = $("#btnDhcpLeaseRowOption" + index);
+    var btn = $("#btnDhcpLeaseRowOption" + id);
+    var originalBtnHtml = btn.html();
     btn.prop("disabled", true);
+    btn.html("<img src='/img/loader-small.gif'/>");
 
     HTTPRequest({
-        url: "/api/convertToReservedLease?token=" + token + "&name=" + encodeURIComponent(scopeName) + "&hardwareAddress=" + encodeURIComponent(hardwareAddress),
+        url: "/api/dhcp/leases/convertToReserved?token=" + sessionData.token + "&name=" + encodeURIComponent(scopeName) + "&clientIdentifier=" + encodeURIComponent(clientIdentifier),
         success: function (responseJSON) {
             btn.prop("disabled", false);
+            btn.html(originalBtnHtml);
 
-            $("#btnDhcpLeaseReserve" + index).hide();
-            $("#btnDhcpLeaseUnreserve" + index).show();
+            $("#btnDhcpLeaseReserve" + id).hide();
+            $("#btnDhcpLeaseUnreserve" + id).show();
 
-            var spanDhcpLeaseType = $("#spanDhcpLeaseType" + index);
+            var spanDhcpLeaseType = $("#spanDhcpLeaseType" + id);
             spanDhcpLeaseType.html("Reserved");
             spanDhcpLeaseType.attr("class", "label label-default");
 
@@ -95,6 +98,7 @@ function convertToReservedLease(index, scopeName, hardwareAddress) {
         },
         error: function () {
             btn.prop("disabled", false);
+            btn.html(originalBtnHtml);
         },
         invalidToken: function () {
             showPageLogin();
@@ -102,22 +106,25 @@ function convertToReservedLease(index, scopeName, hardwareAddress) {
     });
 }
 
-function convertToDynamicLease(index, scopeName, hardwareAddress) {
+function convertToDynamicLease(id, scopeName, clientIdentifier) {
     if (!confirm("Are you sure you want to convert the reserved lease to dynamic lease?"))
         return;
 
-    var btn = $("#btnDhcpLeaseRowOption" + index);
+    var btn = $("#btnDhcpLeaseRowOption" + id);
+    var originalBtnHtml = btn.html();
     btn.prop("disabled", true);
+    btn.html("<img src='/img/loader-small.gif'/>");
 
     HTTPRequest({
-        url: "/api/convertToDynamicLease?token=" + token + "&name=" + encodeURIComponent(scopeName) + "&hardwareAddress=" + encodeURIComponent(hardwareAddress),
+        url: "/api/dhcp/leases/convertToDynamic?token=" + sessionData.token + "&name=" + encodeURIComponent(scopeName) + "&clientIdentifier=" + encodeURIComponent(clientIdentifier),
         success: function (responseJSON) {
             btn.prop("disabled", false);
+            btn.html(originalBtnHtml);
 
-            $("#btnDhcpLeaseReserve" + index).show();
-            $("#btnDhcpLeaseUnreserve" + index).hide();
+            $("#btnDhcpLeaseReserve" + id).show();
+            $("#btnDhcpLeaseUnreserve" + id).hide();
 
-            var spanDhcpLeaseType = $("#spanDhcpLeaseType" + index);
+            var spanDhcpLeaseType = $("#spanDhcpLeaseType" + id);
             spanDhcpLeaseType.html("Dynamic");
             spanDhcpLeaseType.attr("class", "label label-primary");
 
@@ -125,6 +132,7 @@ function convertToDynamicLease(index, scopeName, hardwareAddress) {
         },
         error: function () {
             btn.prop("disabled", false);
+            btn.html(originalBtnHtml);
         },
         invalidToken: function () {
             showPageLogin();
@@ -132,24 +140,31 @@ function convertToDynamicLease(index, scopeName, hardwareAddress) {
     });
 }
 
-function showRemoveLease(scopeName, hardwareAddress) {
-    $("#btnRemoveDhcpLease").attr("onclick", "removeLease(this, '" + scopeName + "', '" + hardwareAddress + "');");
+function showRemoveLeaseModal(index, scopeName, clientIdentifier) {
+    $("#divDhcpRemoveLeaseAlert").html("");
+    $("#btnRemoveDhcpLease").attr("onclick", "removeLease(this, " + index + ", '" + scopeName + "', '" + clientIdentifier + "');");
     $("#modalDhcpRemoveLease").modal("show");
 }
 
-function removeLease(objBtn, scopeName, hardwareAddress) {
+function removeLease(objBtn, index, scopeName, clientIdentifier) {
     var divDhcpRemoveLeaseAlert = $("#divDhcpRemoveLeaseAlert");
     var btn = $(objBtn);
 
     btn.button('loading');
 
     HTTPRequest({
-        url: "/api/removeDhcpLease?token=" + token + "&name=" + encodeURIComponent(scopeName) + "&hardwareAddress=" + encodeURIComponent(hardwareAddress),
+        url: "/api/dhcp/leases/remove?token=" + sessionData.token + "&name=" + encodeURIComponent(scopeName) + "&clientIdentifier=" + encodeURIComponent(clientIdentifier),
         success: function (responseJSON) {
             btn.button('reset');
             $("#modalDhcpRemoveLease").modal("hide");
 
-            refreshDhcpLeases();
+            $("#trDhcpLeaseRow" + index).remove();
+
+            var dhcpLeasesLength = $('#tableDhcpLeasesBody >tr').length;
+            if (dhcpLeasesLength > 0)
+                $("#tableDhcpLeasesFooter").html("<tr><td colspan=\"8\"><b>Total Leases: " + dhcpLeasesLength + "</b></td></tr>");
+            else
+                $("#tableDhcpLeasesFooter").html("<tr><td colspan=\"8\" align=\"center\">No Lease Found</td></tr>");
 
             showAlert("success", "Lease Removed!", "The DHCP lease was removed successfully.");
         },
@@ -167,26 +182,26 @@ function refreshDhcpScopes(checkDisplay) {
     if (checkDisplay == null)
         checkDisplay = false;
 
-    var divDhcpViewScopes = $("#divDhcpViewScopes");
+    var divDhcpEditScope = $("#divDhcpEditScope");
 
-    if (checkDisplay && (divDhcpViewScopes.css('display') === "none"))
+    if (checkDisplay && (divDhcpEditScope.css("display") != "none"))
         return;
 
+    var divDhcpViewScopes = $("#divDhcpViewScopes");
     var divDhcpViewScopesLoader = $("#divDhcpViewScopesLoader");
-    var divDhcpEditScope = $("#divDhcpEditScope");
 
     divDhcpViewScopes.hide();
     divDhcpEditScope.hide();
     divDhcpViewScopesLoader.show();
 
     HTTPRequest({
-        url: "/api/listDhcpScopes?token=" + token,
+        url: "/api/dhcp/scopes/list?token=" + sessionData.token,
         success: function (responseJSON) {
             var dhcpScopes = responseJSON.response.scopes;
             var tableHtmlRows = "";
 
             for (var i = 0; i < dhcpScopes.length; i++) {
-                tableHtmlRows += "<tr><td>" + htmlEncode(dhcpScopes[i].name) + "</td><td>" + dhcpScopes[i].startingAddress + " - " + dhcpScopes[i].endingAddress + "<br />" + dhcpScopes[i].subnetMask + "</td><td>" + dhcpScopes[i].networkAddress + "<br />" + dhcpScopes[i].broadcastAddress + "</td><td>" + (dhcpScopes[i].interfaceAddress == null ? "" : dhcpScopes[i].interfaceAddress) + "</td>";
+                tableHtmlRows += "<tr id=\"trDhcpScopeRow" + i + "\"><td>" + htmlEncode(dhcpScopes[i].name) + "</td><td>" + dhcpScopes[i].startingAddress + " - " + dhcpScopes[i].endingAddress + "<br />" + dhcpScopes[i].subnetMask + "</td><td>" + dhcpScopes[i].networkAddress + "<br />" + dhcpScopes[i].broadcastAddress + "</td><td>" + (dhcpScopes[i].interfaceAddress == null ? "" : dhcpScopes[i].interfaceAddress) + "</td>";
                 tableHtmlRows += "<td align=\"right\"><button type=\"button\" class=\"btn btn-primary\" style=\"font-size: 12px; padding: 2px 0px; width: 60px; margin: 0 6px 6px 0;\" onclick=\"showEditDhcpScope('" + dhcpScopes[i].name + "');\">Edit</button>";
 
                 if (dhcpScopes[i].enabled)
@@ -194,7 +209,7 @@ function refreshDhcpScopes(checkDisplay) {
                 else
                     tableHtmlRows += "<button type=\"button\" class=\"btn btn-default\" style=\"font-size: 12px; padding: 2px 0px; width: 60px; margin: 0 6px 6px 0;\" onclick=\"enableDhcpScope('" + dhcpScopes[i].name + "');\">Enable</button>";
 
-                tableHtmlRows += "<button type=\"button\" class=\"btn btn-danger\" style=\"font-size: 12px; padding: 2px 0px; width: 60px; margin: 0 6px 6px 0;\" onclick=\"deleteDhcpScope('" + dhcpScopes[i].name + "');\">Delete</button></td></tr>";
+                tableHtmlRows += "<button type=\"button\" class=\"btn btn-danger\" style=\"font-size: 12px; padding: 2px 0px; width: 60px; margin: 0 6px 6px 0;\" onclick=\"deleteDhcpScope(" + i + ", '" + dhcpScopes[i].name + "');\">Delete</button></td></tr>";
             }
 
             $("#tableDhcpScopesBody").html(tableHtmlRows);
@@ -268,6 +283,9 @@ function clearDhcpScopeForm() {
     $("#txtDhcpScopeLeaseTimeHours").val("0");
     $("#txtDhcpScopeLeaseTimeMinutes").val("0");
     $("#txtDhcpScopeOfferDelayTime").val("0");
+    $("#chkDhcpScopePingCheckEnabled").prop("checked", false);
+    $("#txtDhcpScopePingCheckTimeout").val("1000");
+    $("#txtDhcpScopePingCheckRetries").val("2");
     $("#txtDhcpScopeDomainName").val("");
     $("#txtDhcpScopeDnsTtl").val("900");
     $("#txtDhcpScopeServerAddress").val("");
@@ -311,7 +329,7 @@ function showEditDhcpScope(scopeName) {
     divDhcpViewScopesLoader.show();
 
     HTTPRequest({
-        url: "/api/getDhcpScope?token=" + token + "&name=" + scopeName,
+        url: "/api/dhcp/scopes/get?token=" + sessionData.token + "&name=" + scopeName,
         success: function (responseJSON) {
             $("#txtDhcpScopeName").attr("data-name", responseJSON.response.name);
             $("#txtDhcpScopeName").val(responseJSON.response.name);
@@ -381,6 +399,7 @@ function showEditDhcpScope(scopeName) {
             }
 
             $("#chkAllowOnlyReservedLeases").prop("checked", responseJSON.response.allowOnlyReservedLeases);
+            $("#chkBlockLocallyAdministeredMacAddresses").prop("checked", responseJSON.response.blockLocallyAdministeredMacAddresses);
 
             divDhcpViewScopesLoader.hide();
             divDhcpEditScope.show();
@@ -445,15 +464,16 @@ function saveDhcpScope() {
         return;
 
     var allowOnlyReservedLeases = $("#chkAllowOnlyReservedLeases").prop('checked');
+    var blockLocallyAdministeredMacAddresses = $("#chkBlockLocallyAdministeredMacAddresses").prop('checked');
 
     var btn = $("#btnSaveDhcpScope").button('loading');
 
     HTTPRequest({
-        url: "/api/setDhcpScope?token=" + token + "&name=" + encodeURIComponent(name) + (newName == null ? "" : "&newName=" + encodeURIComponent(newName)) + "&startingAddress=" + encodeURIComponent(startingAddress) + "&endingAddress=" + encodeURIComponent(endingAddress) + "&subnetMask=" + encodeURIComponent(subnetMask) +
+        url: "/api/dhcp/scopes/set?token=" + sessionData.token + "&name=" + encodeURIComponent(name) + (newName == null ? "" : "&newName=" + encodeURIComponent(newName)) + "&startingAddress=" + encodeURIComponent(startingAddress) + "&endingAddress=" + encodeURIComponent(endingAddress) + "&subnetMask=" + encodeURIComponent(subnetMask) +
             "&leaseTimeDays=" + leaseTimeDays + "&leaseTimeHours=" + leaseTimeHours + "&leaseTimeMinutes=" + leaseTimeMinutes + "&offerDelayTime=" + offerDelayTime + "&pingCheckEnabled=" + pingCheckEnabled + "&pingCheckTimeout=" + pingCheckTimeout + "&pingCheckRetries=" + pingCheckRetries +
             "&domainName=" + encodeURIComponent(domainName) + "&dnsTtl=" + dnsTtl + "&serverAddress=" + encodeURIComponent(serverAddress) + "&serverHostName=" + encodeURIComponent(serverHostName) + "&bootFileName=" + encodeURIComponent(bootFileName) +
             "&routerAddress=" + encodeURIComponent(routerAddress) + "&useThisDnsServer=" + useThisDnsServer + (useThisDnsServer ? "" : "&dnsServers=" + encodeURIComponent(dnsServers)) + "&winsServers=" + encodeURIComponent(winsServers) + "&ntpServers=" + encodeURIComponent(ntpServers) +
-            "&staticRoutes=" + encodeURIComponent(staticRoutes) + "&vendorInfo=" + encodeURIComponent(vendorInfo) + "&exclusions=" + encodeURIComponent(exclusions) + "&reservedLeases=" + encodeURIComponent(reservedLeases) + "&allowOnlyReservedLeases=" + allowOnlyReservedLeases,
+            "&staticRoutes=" + encodeURIComponent(staticRoutes) + "&vendorInfo=" + encodeURIComponent(vendorInfo) + "&exclusions=" + encodeURIComponent(exclusions) + "&reservedLeases=" + encodeURIComponent(reservedLeases) + "&allowOnlyReservedLeases=" + allowOnlyReservedLeases + "&blockLocallyAdministeredMacAddresses=" + blockLocallyAdministeredMacAddresses,
         success: function (responseJSON) {
             refreshDhcpScopes();
             btn.button('reset');
@@ -482,7 +502,7 @@ function disableDhcpScope(scopeName) {
     divDhcpViewScopesLoader.show();
 
     HTTPRequest({
-        url: "/api/disableDhcpScope?token=" + token + "&name=" + scopeName,
+        url: "/api/dhcp/scopes/disable?token=" + sessionData.token + "&name=" + scopeName,
         success: function (responseJSON) {
             refreshDhcpScopes();
             showAlert("success", "Scope Disabled!", "DHCP Scope was disabled successfully.");
@@ -508,7 +528,7 @@ function enableDhcpScope(scopeName) {
     divDhcpViewScopesLoader.show();
 
     HTTPRequest({
-        url: "/api/enableDhcpScope?token=" + token + "&name=" + scopeName,
+        url: "/api/dhcp/scopes/enable?token=" + sessionData.token + "&name=" + scopeName,
         success: function (responseJSON) {
             refreshDhcpScopes();
             showAlert("success", "Scope Enabled!", "DHCP Scope was enabled successfully.");
@@ -524,7 +544,7 @@ function enableDhcpScope(scopeName) {
     });
 }
 
-function deleteDhcpScope(scopeName) {
+function deleteDhcpScope(index, scopeName) {
     if (!confirm("Are you sure you want to delete the DHCP scope '" + scopeName + "'?"))
         return;
 
@@ -537,9 +557,19 @@ function deleteDhcpScope(scopeName) {
     divDhcpViewScopesLoader.show();
 
     HTTPRequest({
-        url: "/api/deleteDhcpScope?token=" + token + "&name=" + scopeName,
+        url: "/api/dhcp/scopes/delete?token=" + sessionData.token + "&name=" + scopeName,
         success: function (responseJSON) {
-            refreshDhcpScopes();
+            $("#trDhcpScopeRow" + index).remove();
+
+            var dhcpLeasesLength = $('#tableDhcpScopesBody >tr').length;
+            if (dhcpLeasesLength > 0)
+                $("#tableDhcpScopesFooter").html("<tr><td colspan=\"5\"><b>Total Scopes: " + dhcpLeasesLength + "</b></td></tr>");
+            else
+                $("#tableDhcpScopesFooter").html("<tr><td colspan=\"5\" align=\"center\">No Scope Found</td></tr>");
+
+            divDhcpViewScopes.show();
+            divDhcpViewScopesLoader.hide();
+
             showAlert("success", "Scope Deleted!", "DHCP Scope was deleted successfully.");
         },
         error: function () {

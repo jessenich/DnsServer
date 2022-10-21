@@ -304,29 +304,28 @@ end;
 
 
 
-{ Check if dotnet5 is installed }
-function IsDotNet5DesktopInstalled: Boolean;
+{ Check if dotnet is installed }
+function IsDotNetDesktopInstalled: Boolean;
 var
   ResultCode: Integer;
 begin
   Result := false;
-  Exec('cmd.exe', '/c dotnet --list-runtimes | find /n "Microsoft.WindowsDesktop.App 5."', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('cmd.exe', '/c dotnet --list-runtimes | find /n "Microsoft.WindowsDesktop.App 6.0.9"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode = 0 then 
   begin 
     Result := true;
   end;
 end;
 
-{ if dotnet5 is not installed then add it for download }
+{ if dotnet is not installed then add it for download }
 procedure CheckDotnetDependency;
 begin
-  if not IsDotNet5DesktopInstalled then
+  if not IsDotNetDesktopInstalled then
   begin
-    AddDependency('dotnet50desktop' + GetArchitectureSuffix + '.exe',
+    AddDependency('dotnet60desktop' + GetArchitectureSuffix + '.exe',
       '/lcid ' + IntToStr(GetUILanguage) + ' /passive /norestart',
-      '.NET Desktop Runtime 5.0.10' + GetArchitectureTitle,
-      GetString('https://download.visualstudio.microsoft.com/download/pr/7ed142ef-5738-4eea-bdd3-9210c5dd4973/ce3d680c487b178a828c5c3edd9ec685/windowsdesktop-runtime-5.0.10-win-x86.exe', 'https://download.visualstudio.microsoft.com/download/pr/78fa839b-2d86-4ece-9d97-5b9fe6fb66fa/10d406c0d247470daa80691d3b3460a6/windowsdesktop-runtime-5.0.10-win-x64.exe'),
+      '.NET Desktop Runtime 6.0.9' + GetArchitectureTitle,
+      GetString('https://download.visualstudio.microsoft.com/download/pr/925f9407-2767-4341-857a-43cdfad71e17/0b84db913bdbb1dcf02db937a3cd3f63/windowsdesktop-runtime-6.0.9-win-x86.exe', 'https://download.visualstudio.microsoft.com/download/pr/fe8415d4-8a35-4af9-80a5-51306a96282d/05f9b2a1b4884238e69468e49b3a5453/windowsdesktop-runtime-6.0.9-win-x64.exe'),
       '', False, False, False);
   end;
 end;
-

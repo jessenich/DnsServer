@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -25,12 +25,14 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
+using TechnitiumLibrary;
 using TechnitiumLibrary.IO;
 
 namespace DnsServerCore
 {
-    class WebServiceAppsApi
+    sealed class WebServiceAppsApi : IDisposable
     {
         #region variables
 
@@ -40,6 +42,10 @@ namespace DnsServerCore
         string _storeAppsJsonData;
         DateTime _storeAppsJsonDataUpdatedOn;
         const int STORE_APPS_JSON_DATA_CACHE_TIME_SECONDS = 300;
+
+        Timer _appUpdateTimer;
+        const int APP_UPDATE_TIMER_INITIAL_INTERVAL = 10000;
+        const int APP_UPDATE_TIMER_PERIODIC_INTERVAL = 86400000;
 
         #endregion
 
@@ -53,7 +59,107 @@ namespace DnsServerCore
 
         #endregion
 
+        #region IDisposable
+
+        bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            if (_appUpdateTimer is not null)
+                _appUpdateTimer.Dispose();
+
+            _disposed = true;
+        }
+
+        #endregion
+
         #region private
+
+        private void StartAutomaticUpdate()
+        {
+            if (_appUpdateTimer is null)
+            {
+                _appUpdateTimer = new Timer(async delegate (object state)
+                {
+                    try
+                    {
+                        if (_dnsWebService.DnsServer.DnsApplicationManager.Applications.Count < 1)
+                            return;
+
+                        _dnsWebService.Log.Write("DNS Server has started automatic update check for DNS Apps.");
+
+                        string storeAppsJsonData = await GetStoreAppsJsonData().WithTimeout(5000);
+                        dynamic jsonStoreAppsArray = JsonConvert.DeserializeObject(storeAppsJsonData);
+
+                        foreach (DnsApplication application in _dnsWebService.DnsServer.DnsApplicationManager.Applications.Values)
+                        {
+                            foreach (dynamic jsonStoreApp in jsonStoreAppsArray)
+                            {
+                                string name = jsonStoreApp.name.Value;
+                                if (name.Equals(application.Name))
+                                {
+                                    string url = null;
+                                    Version storeAppVersion = null;
+                                    Version lastServerVersion = null;
+
+                                    foreach (dynamic jsonVersion in jsonStoreApp.versions)
+                                    {
+                                        string strServerVersion = jsonVersion.serverVersion.Value;
+                                        Version requiredServerVersion = new Version(strServerVersion);
+
+                                        if (_dnsWebService.ServerVersion < requiredServerVersion)
+                                            continue;
+
+                                        if ((lastServerVersion is not null) && (lastServerVersion > requiredServerVersion))
+                                            continue;
+
+                                        string version = jsonVersion.version.Value;
+                                        url = jsonVersion.url.Value;
+
+                                        storeAppVersion = new Version(version);
+                                        lastServerVersion = requiredServerVersion;
+                                    }
+
+                                    if ((storeAppVersion is not null) && (storeAppVersion > application.Version))
+                                    {
+                                        try
+                                        {
+                                            await DownloadAndUpdateAppAsync(application.Name, url);
+
+                                            _dnsWebService.Log.Write("DNS application '" + application.Name + "' was automatically updated successfully from: " + url);
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            _dnsWebService.Log.Write("Failed to automatically download and update DNS application '" + application.Name + "': " + ex.ToString());
+                                        }
+                                    }
+
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _dnsWebService.Log.Write(ex);
+                    }
+                });
+
+                _appUpdateTimer.Change(APP_UPDATE_TIMER_INITIAL_INTERVAL, APP_UPDATE_TIMER_PERIODIC_INTERVAL);
+            }
+        }
+
+        private void StopAutomaticUpdate()
+        {
+            if (_appUpdateTimer is not null)
+            {
+                _appUpdateTimer.Dispose();
+                _appUpdateTimer = null;
+            }
+        }
 
         private async Task<string> GetStoreAppsJsonData()
         {
@@ -61,6 +167,7 @@ namespace DnsServerCore
             {
                 SocketsHttpHandler handler = new SocketsHttpHandler();
                 handler.Proxy = _dnsWebService.DnsServer.Proxy;
+                handler.UseProxy = _dnsWebService.DnsServer.Proxy is not null;
                 handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
 
                 using (HttpClient http = new HttpClient(handler))
@@ -73,6 +180,147 @@ namespace DnsServerCore
             return _storeAppsJsonData;
         }
 
+        private async Task<DnsApplication> DownloadAndUpdateAppAsync(string applicationName, string url)
+        {
+            string tmpFile = Path.GetTempFileName();
+            try
+            {
+                using (FileStream fS = new FileStream(tmpFile, FileMode.Create, FileAccess.ReadWrite))
+                {
+                    //download to temp file
+                    SocketsHttpHandler handler = new SocketsHttpHandler();
+                    handler.Proxy = _dnsWebService.DnsServer.Proxy;
+                    handler.UseProxy = _dnsWebService.DnsServer.Proxy is not null;
+                    handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+
+                    using (HttpClient http = new HttpClient(handler))
+                    {
+                        using (Stream httpStream = await http.GetStreamAsync(url))
+                        {
+                            await httpStream.CopyToAsync(fS);
+                        }
+                    }
+
+                    //update app
+                    fS.Position = 0;
+                    return await _dnsWebService.DnsServer.DnsApplicationManager.UpdateApplicationAsync(applicationName, fS);
+                }
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(tmpFile);
+                }
+                catch (Exception ex)
+                {
+                    _dnsWebService.Log.Write(ex);
+                }
+            }
+        }
+
+        private void WriteAppAsJson(JsonTextWriter jsonWriter, DnsApplication application, dynamic jsonStoreAppsArray)
+        {
+            jsonWriter.WriteStartObject();
+
+            jsonWriter.WritePropertyName("name");
+            jsonWriter.WriteValue(application.Name);
+
+            jsonWriter.WritePropertyName("version");
+            jsonWriter.WriteValue(DnsWebService.GetCleanVersion(application.Version));
+
+            if (jsonStoreAppsArray != null)
+            {
+                foreach (dynamic jsonStoreApp in jsonStoreAppsArray)
+                {
+                    string name = jsonStoreApp.name.Value;
+                    if (name.Equals(application.Name))
+                    {
+                        string version = null;
+                        string url = null;
+                        Version storeAppVersion = null;
+                        Version lastServerVersion = null;
+
+                        foreach (dynamic jsonVersion in jsonStoreApp.versions)
+                        {
+                            string strServerVersion = jsonVersion.serverVersion.Value;
+                            Version requiredServerVersion = new Version(strServerVersion);
+
+                            if (_dnsWebService.ServerVersion < requiredServerVersion)
+                                continue;
+
+                            if ((lastServerVersion is not null) && (lastServerVersion > requiredServerVersion))
+                                continue;
+
+                            version = jsonVersion.version.Value;
+                            url = jsonVersion.url.Value;
+
+                            storeAppVersion = new Version(version);
+                            lastServerVersion = requiredServerVersion;
+                        }
+
+                        if (storeAppVersion is null)
+                            break; //no compatible update available
+
+                        jsonWriter.WritePropertyName("updateVersion");
+                        jsonWriter.WriteValue(version);
+
+                        jsonWriter.WritePropertyName("updateUrl");
+                        jsonWriter.WriteValue(url);
+
+                        jsonWriter.WritePropertyName("updateAvailable");
+                        jsonWriter.WriteValue(storeAppVersion > application.Version);
+                        break;
+                    }
+                }
+            }
+
+            jsonWriter.WritePropertyName("dnsApps");
+            {
+                jsonWriter.WriteStartArray();
+
+                foreach (KeyValuePair<string, IDnsApplication> dnsApp in application.DnsApplications)
+                {
+                    jsonWriter.WriteStartObject();
+
+                    jsonWriter.WritePropertyName("classPath");
+                    jsonWriter.WriteValue(dnsApp.Key);
+
+                    jsonWriter.WritePropertyName("description");
+                    jsonWriter.WriteValue(dnsApp.Value.Description);
+
+                    if (dnsApp.Value is IDnsAppRecordRequestHandler appRecordHandler)
+                    {
+                        jsonWriter.WritePropertyName("isAppRecordRequestHandler");
+                        jsonWriter.WriteValue(true);
+
+                        jsonWriter.WritePropertyName("recordDataTemplate");
+                        jsonWriter.WriteValue(appRecordHandler.ApplicationRecordDataTemplate);
+                    }
+                    else
+                    {
+                        jsonWriter.WritePropertyName("isAppRecordRequestHandler");
+                        jsonWriter.WriteValue(false);
+                    }
+
+                    jsonWriter.WritePropertyName("isRequestController");
+                    jsonWriter.WriteValue(dnsApp.Value is IDnsRequestController);
+
+                    jsonWriter.WritePropertyName("isAuthoritativeRequestHandler");
+                    jsonWriter.WriteValue(dnsApp.Value is IDnsAuthoritativeRequestHandler);
+
+                    jsonWriter.WritePropertyName("isQueryLogger");
+                    jsonWriter.WriteValue(dnsApp.Value is IDnsQueryLogger);
+
+                    jsonWriter.WriteEndObject();
+                }
+
+                jsonWriter.WriteEndArray();
+            }
+
+            jsonWriter.WriteEndObject();
+        }
+
         #endregion
 
         #region public
@@ -80,7 +328,6 @@ namespace DnsServerCore
         public async Task ListInstalledAppsAsync(JsonTextWriter jsonWriter)
         {
             List<string> apps = new List<string>(_dnsWebService.DnsServer.DnsApplicationManager.Applications.Keys);
-
             apps.Sort();
 
             dynamic jsonStoreAppsArray = null;
@@ -102,83 +349,7 @@ namespace DnsServerCore
             foreach (string app in apps)
             {
                 if (_dnsWebService.DnsServer.DnsApplicationManager.Applications.TryGetValue(app, out DnsApplication application))
-                {
-                    jsonWriter.WriteStartObject();
-
-                    jsonWriter.WritePropertyName("name");
-                    jsonWriter.WriteValue(application.Name);
-
-                    jsonWriter.WritePropertyName("version");
-                    jsonWriter.WriteValue(DnsWebService.GetCleanVersion(application.Version));
-
-                    if (jsonStoreAppsArray != null)
-                    {
-                        foreach (dynamic jsonStoreApp in jsonStoreAppsArray)
-                        {
-                            string name = jsonStoreApp.name.Value;
-                            if (name.Equals(application.Name))
-                            {
-                                string version = jsonStoreApp.version.Value;
-                                string url = jsonStoreApp.url.Value;
-
-                                jsonWriter.WritePropertyName("updateVersion");
-                                jsonWriter.WriteValue(version);
-
-                                jsonWriter.WritePropertyName("updateUrl");
-                                jsonWriter.WriteValue(url);
-
-                                jsonWriter.WritePropertyName("updateAvailable");
-                                jsonWriter.WriteValue(new Version(version) > application.Version);
-                                break;
-                            }
-                        }
-                    }
-
-                    jsonWriter.WritePropertyName("dnsApps");
-                    {
-                        jsonWriter.WriteStartArray();
-
-                        foreach (KeyValuePair<string, IDnsApplication> dnsApp in application.DnsApplications)
-                        {
-                            jsonWriter.WriteStartObject();
-
-                            jsonWriter.WritePropertyName("classPath");
-                            jsonWriter.WriteValue(dnsApp.Key);
-
-                            jsonWriter.WritePropertyName("description");
-                            jsonWriter.WriteValue(dnsApp.Value.Description);
-
-                            if (dnsApp.Value is IDnsAppRecordRequestHandler appRecordHandler)
-                            {
-                                jsonWriter.WritePropertyName("isAppRecordRequestHandler");
-                                jsonWriter.WriteValue(true);
-
-                                jsonWriter.WritePropertyName("recordDataTemplate");
-                                jsonWriter.WriteValue(appRecordHandler.ApplicationRecordDataTemplate);
-                            }
-                            else
-                            {
-                                jsonWriter.WritePropertyName("isAppRecordRequestHandler");
-                                jsonWriter.WriteValue(false);
-                            }
-
-                            jsonWriter.WritePropertyName("isRequestController");
-                            jsonWriter.WriteValue(dnsApp.Value is IDnsRequestController);
-
-                            jsonWriter.WritePropertyName("isAuthoritativeRequestHandler");
-                            jsonWriter.WriteValue(dnsApp.Value is IDnsAuthoritativeRequestHandler);
-
-                            jsonWriter.WritePropertyName("isQueryLogger");
-                            jsonWriter.WriteValue(dnsApp.Value is IDnsQueryLogger);
-
-                            jsonWriter.WriteEndObject();
-                        }
-
-                        jsonWriter.WriteEndArray();
-                    }
-
-                    jsonWriter.WriteEndObject();
-                }
+                    WriteAppAsJson(jsonWriter, application, jsonStoreAppsArray);
             }
 
             jsonWriter.WriteEndArray();
@@ -195,21 +366,45 @@ namespace DnsServerCore
             foreach (dynamic jsonStoreApp in jsonStoreAppsArray)
             {
                 string name = jsonStoreApp.name.Value;
-                string version = jsonStoreApp.version.Value;
                 string description = jsonStoreApp.description.Value;
-                string url = jsonStoreApp.url.Value;
-                string size = jsonStoreApp.size.Value;
+                string version = null;
+                string url = null;
+                string size = null;
+                Version storeAppVersion = null;
+                Version lastServerVersion = null;
+
+                foreach (dynamic jsonVersion in jsonStoreApp.versions)
+                {
+                    string strServerVersion = jsonVersion.serverVersion.Value;
+                    Version requiredServerVersion = new Version(strServerVersion);
+
+                    if (_dnsWebService.ServerVersion < requiredServerVersion)
+                        continue;
+
+                    if ((lastServerVersion is not null) && (lastServerVersion > requiredServerVersion))
+                        continue;
+
+                    version = jsonVersion.version.Value;
+                    url = jsonVersion.url.Value;
+                    size = jsonVersion.size.Value;
+
+                    storeAppVersion = new Version(version);
+                    lastServerVersion = requiredServerVersion;
+                }
+
+                if (storeAppVersion is null)
+                    continue; //app is not compatible
 
                 jsonWriter.WriteStartObject();
 
                 jsonWriter.WritePropertyName("name");
                 jsonWriter.WriteValue(name);
 
-                jsonWriter.WritePropertyName("version");
-                jsonWriter.WriteValue(version);
-
                 jsonWriter.WritePropertyName("description");
                 jsonWriter.WriteValue(description);
+
+                jsonWriter.WritePropertyName("version");
+                jsonWriter.WriteValue(version);
 
                 jsonWriter.WritePropertyName("url");
                 jsonWriter.WriteValue(url);
@@ -228,7 +423,7 @@ namespace DnsServerCore
                     jsonWriter.WriteValue(DnsWebService.GetCleanVersion(installedApp.Version));
 
                     jsonWriter.WritePropertyName("updateAvailable");
-                    jsonWriter.WriteValue(new Version(version) > installedApp.Version);
+                    jsonWriter.WriteValue(storeAppVersion > installedApp.Version);
                 }
 
                 jsonWriter.WriteEndObject();
@@ -237,7 +432,7 @@ namespace DnsServerCore
             jsonWriter.WriteEndArray();
         }
 
-        public async Task DownloadAndInstallAppAsync(HttpListenerRequest request)
+        public async Task DownloadAndInstallAppAsync(HttpListenerRequest request, JsonTextWriter jsonWriter)
         {
             string name = request.QueryString["name"];
             if (string.IsNullOrEmpty(name))
@@ -260,6 +455,7 @@ namespace DnsServerCore
                     //download to temp file
                     SocketsHttpHandler handler = new SocketsHttpHandler();
                     handler.Proxy = _dnsWebService.DnsServer.Proxy;
+                    handler.UseProxy = _dnsWebService.DnsServer.Proxy is not null;
                     handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
 
                     using (HttpClient http = new HttpClient(handler))
@@ -272,9 +468,12 @@ namespace DnsServerCore
 
                     //install app
                     fS.Position = 0;
-                    await _dnsWebService.DnsServer.DnsApplicationManager.InstallApplicationAsync(name, fS);
+                    DnsApplication application = await _dnsWebService.DnsServer.DnsApplicationManager.InstallApplicationAsync(name, fS);
 
-                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] DNS application '" + name + "' was installed successfully from: " + url);
+                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] DNS application '" + name + "' was installed successfully from: " + url);
+
+                    jsonWriter.WritePropertyName("installedApp");
+                    WriteAppAsJson(jsonWriter, application, null);
                 }
             }
             finally
@@ -290,7 +489,7 @@ namespace DnsServerCore
             }
         }
 
-        public async Task DownloadAndUpdateAppAsync(HttpListenerRequest request)
+        public async Task DownloadAndUpdateAppAsync(HttpListenerRequest request, JsonTextWriter jsonWriter)
         {
             string name = request.QueryString["name"];
             if (string.IsNullOrEmpty(name))
@@ -305,45 +504,15 @@ namespace DnsServerCore
             if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                 throw new DnsWebServiceException("Parameter 'url' value must start with 'https://'.");
 
-            string tmpFile = Path.GetTempFileName();
-            try
-            {
-                using (FileStream fS = new FileStream(tmpFile, FileMode.Create, FileAccess.ReadWrite))
-                {
-                    //download to temp file
-                    SocketsHttpHandler handler = new SocketsHttpHandler();
-                    handler.Proxy = _dnsWebService.DnsServer.Proxy;
-                    handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+            DnsApplication application = await DownloadAndUpdateAppAsync(name, url);
 
-                    using (HttpClient http = new HttpClient(handler))
-                    {
-                        using (Stream httpStream = await http.GetStreamAsync(url))
-                        {
-                            await httpStream.CopyToAsync(fS);
-                        }
-                    }
+            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] DNS application '" + name + "' was updated successfully from: " + url);
 
-                    //update app
-                    fS.Position = 0;
-                    await _dnsWebService.DnsServer.DnsApplicationManager.UpdateApplicationAsync(name, fS);
-
-                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] DNS application '" + name + "' was updated successfully from: " + url);
-                }
-            }
-            finally
-            {
-                try
-                {
-                    File.Delete(tmpFile);
-                }
-                catch (Exception ex)
-                {
-                    _dnsWebService.Log.Write(ex);
-                }
-            }
+            jsonWriter.WritePropertyName("updatedApp");
+            WriteAppAsJson(jsonWriter, application, null);
         }
 
-        public async Task InstallAppAsync(HttpListenerRequest request)
+        public async Task InstallAppAsync(HttpListenerRequest request, JsonTextWriter jsonWriter)
         {
             string name = request.QueryString["name"];
             if (string.IsNullOrEmpty(name))
@@ -358,12 +527,9 @@ namespace DnsServerCore
 
             while (crlfCount != 4)
             {
-                byteRead = request.InputStream.ReadByte();
+                byteRead = await request.InputStream.ReadByteValueAsync();
                 switch (byteRead)
                 {
-                    case -1:
-                        throw new EndOfStreamException();
-
                     case 13: //CR
                     case 10: //LF
                         crlfCount++;
@@ -387,9 +553,12 @@ namespace DnsServerCore
 
                     //install app
                     fS.Position = 0;
-                    await _dnsWebService.DnsServer.DnsApplicationManager.InstallApplicationAsync(name, fS);
+                    DnsApplication application = await _dnsWebService.DnsServer.DnsApplicationManager.InstallApplicationAsync(name, fS);
 
-                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] DNS application '" + name + "' was installed successfully.");
+                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] DNS application '" + name + "' was installed successfully.");
+
+                    jsonWriter.WritePropertyName("installedApp");
+                    WriteAppAsJson(jsonWriter, application, null);
                 }
             }
             finally
@@ -405,7 +574,7 @@ namespace DnsServerCore
             }
         }
 
-        public async Task UpdateAppAsync(HttpListenerRequest request)
+        public async Task UpdateAppAsync(HttpListenerRequest request, JsonTextWriter jsonWriter)
         {
             string name = request.QueryString["name"];
             if (string.IsNullOrEmpty(name))
@@ -420,12 +589,9 @@ namespace DnsServerCore
 
             while (crlfCount != 4)
             {
-                byteRead = request.InputStream.ReadByte();
+                byteRead = await request.InputStream.ReadByteValueAsync();
                 switch (byteRead)
                 {
-                    case -1:
-                        throw new EndOfStreamException();
-
                     case 13: //CR
                     case 10: //LF
                         crlfCount++;
@@ -449,9 +615,12 @@ namespace DnsServerCore
 
                     //update app
                     fS.Position = 0;
-                    await _dnsWebService.DnsServer.DnsApplicationManager.UpdateApplicationAsync(name, fS);
+                    DnsApplication application = await _dnsWebService.DnsServer.DnsApplicationManager.UpdateApplicationAsync(name, fS);
 
-                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] DNS application '" + name + "' was updated successfully.");
+                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] DNS application '" + name + "' was updated successfully.");
+
+                    jsonWriter.WritePropertyName("updatedApp");
+                    WriteAppAsJson(jsonWriter, application, null);
                 }
             }
             finally
@@ -476,7 +645,7 @@ namespace DnsServerCore
             name = name.Trim();
 
             _dnsWebService.DnsServer.DnsApplicationManager.UninstallApplication(name);
-            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] DNS application '" + name + "' was uninstalled successfully.");
+            _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] DNS application '" + name + "' was uninstalled successfully.");
         }
 
         public async Task GetAppConfigAsync(HttpListenerRequest request, JsonTextWriter jsonWriter)
@@ -510,7 +679,7 @@ namespace DnsServerCore
             string formRequest;
             using (StreamReader sR = new StreamReader(request.InputStream, request.ContentEncoding))
             {
-                formRequest = sR.ReadToEnd();
+                formRequest = await sR.ReadToEndAsync();
             }
 
             string[] formParts = formRequest.Split('&');
@@ -519,19 +688,35 @@ namespace DnsServerCore
             {
                 if (formPart.StartsWith("config="))
                 {
-                    string config = formPart.Substring(7);
+                    string config = Uri.UnescapeDataString(formPart.Substring(7));
 
                     if (config.Length == 0)
                         config = null;
 
                     await application.SetConfigAsync(config);
 
-                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).Username + "] DNS application '" + name + "' app config was saved successfully.");
+                    _dnsWebService.Log.Write(DnsWebService.GetRequestRemoteEndPoint(request), "[" + _dnsWebService.GetSession(request).User.Username + "] DNS application '" + name + "' app config was saved successfully.");
                     return;
                 }
             }
 
             throw new DnsWebServiceException("Missing POST parameter: config");
+        }
+
+        #endregion
+
+        #region properties
+
+        public bool EnableAutomaticUpdate
+        {
+            get { return _appUpdateTimer is not null; }
+            set
+            {
+                if (value)
+                    StartAutomaticUpdate();
+                else
+                    StopAutomaticUpdate();
+            }
         }
 
         #endregion

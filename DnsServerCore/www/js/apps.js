@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -25,65 +25,13 @@ function refreshApps() {
     divViewAppsLoader.show();
 
     HTTPRequest({
-        url: "/api/apps/list?token=" + token,
+        url: "/api/apps/list?token=" + sessionData.token,
         success: function (responseJSON) {
             var apps = responseJSON.response.apps;
             var tableHtmlRows = "";
 
             for (var i = 0; i < apps.length; i++) {
-                var id = Math.floor(Math.random() * 10000);
-                var name = apps[i].name;
-                var version = apps[i].version;
-                var updateVersion = apps[i].updateVersion;
-                var updateUrl = apps[i].updateUrl;
-                var updateAvailable = apps[i].updateAvailable;
-
-                var dnsAppsTable = null;
-
-                //dnsApps
-                if (apps[i].dnsApps.length > 0) {
-                    dnsAppsTable = "<table class=\"table\"><thead><th>Class Path</th><th>Description</th></thead><tbody>";
-
-                    for (var j = 0; j < apps[i].dnsApps.length; j++) {
-                        var labels = "";
-                        var description = null;
-
-                        if (apps[i].dnsApps[j].isAppRecordRequestHandler) {
-                            labels += "<span class=\"label label-info\">APP Record</span>";
-                            description = "<p>" + htmlEncode(apps[i].dnsApps[j].description).replace(/\n/g, "<br />") + "</p>" + (apps[i].dnsApps[j].recordDataTemplate == null ? "" : "<div><b>Record Data Template</b><pre>" + htmlEncode(apps[i].dnsApps[j].recordDataTemplate) + "</pre></div>");
-                        }
-
-                        if (apps[i].dnsApps[j].isRequestController)
-                            labels += "<span class=\"label label-info\">Drop Request</span>";
-
-                        if (apps[i].dnsApps[j].isAuthoritativeRequestHandler)
-                            labels += "<span class=\"label label-info\">Authoritative</span>";
-
-                        if (apps[i].dnsApps[j].isQueryLogger)
-                            labels += "<span class=\"label label-info\">Query Logs</span>";
-
-                        if (labels == "")
-                            labels = "<span class=\"label label-info\">Generic</span>";
-
-                        if (description == null)
-                            description = htmlEncode(apps[i].dnsApps[j].description).replace(/\n/g, "<br />");
-
-                        dnsAppsTable += "<tr><td>" + htmlEncode(apps[i].dnsApps[j].classPath) + "</br>" + labels + "</td><td>" + description + "</td></tr>";
-                    }
-
-                    dnsAppsTable += "</tbody></table>"
-                }
-
-                tableHtmlRows += "<tr id=\"trApp" + id + "\"><td><div style=\"margin-bottom: 20px;\"><span style=\"font-weight: bold; font-size: 16px;\">" + htmlEncode(name) + "</span><br /><span id=\"trAppVersion" + id + "\" class=\"label label-primary\">Version " + htmlEncode(version) + "</span> <span id=\"trAppUpdateVersion" + id + "\" class=\"label label-warning\" style=\"" + (updateAvailable ? "" : "display: none;") + "\">Update " + htmlEncode(updateVersion) + "</span></div>";
-
-                if (dnsAppsTable != null)
-                    tableHtmlRows += dnsAppsTable;
-
-                tableHtmlRows += "</td>";
-                tableHtmlRows += "<td><button type=\"button\" class=\"btn btn-default\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; display: block;\" onclick=\"showAppConfigModal(this, '" + name + "');\" data-loading-text=\"Loading...\">Config</button>";
-                tableHtmlRows += "<button type=\"button\" class=\"btn btn-warning\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; display: block;\" onclick=\"showUpdateAppModal('" + name + "');\">Update</button>";
-                tableHtmlRows += "<button id=\"btnAppsStoreUpdate" + id + "\" type=\"button\" data-id=\"" + id + "\" class=\"btn btn-warning\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; " + (updateAvailable ? "" : "display: none;") + "\" onclick=\"updateStoreApp(this, '" + name + "', '" + updateUrl + "', false);\" data-loading-text=\"Updating...\">Store Update</button>";
-                tableHtmlRows += "<button type=\"button\" data-id=\"" + id + "\" class=\"btn btn-danger\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; display: block;\" onclick=\"uninstallApp(this, '" + name + "');\" data-loading-text=\"Uninstalling...\">Uninstall</button></td></tr>";
+                tableHtmlRows += getAppRowHtml(apps[i]);
             }
 
             $("#tableAppsBody").html(tableHtmlRows);
@@ -107,6 +55,68 @@ function refreshApps() {
     });
 }
 
+function getAppRowId(appName) {
+    return appName.replace(/ /g, "");
+}
+
+function getAppRowHtml(app) {
+    var name = app.name;
+    var version = app.version;
+    var updateVersion = app.updateVersion;
+    var updateUrl = app.updateUrl;
+    var updateAvailable = app.updateAvailable;
+
+    var dnsAppsTable = null;
+
+    //dnsApps
+    if (app.dnsApps.length > 0) {
+        dnsAppsTable = "<table class=\"table\"><thead><th>Class Path</th><th>Description</th></thead><tbody>";
+
+        for (var j = 0; j < app.dnsApps.length; j++) {
+            var labels = "";
+            var description = null;
+
+            if (app.dnsApps[j].isAppRecordRequestHandler) {
+                labels += "<span class=\"label label-info\">APP Record</span>";
+                description = "<p>" + htmlEncode(app.dnsApps[j].description).replace(/\n/g, "<br />") + "</p>" + (app.dnsApps[j].recordDataTemplate == null ? "" : "<div><b>Record Data Template</b><pre>" + htmlEncode(app.dnsApps[j].recordDataTemplate) + "</pre></div>");
+            }
+
+            if (app.dnsApps[j].isRequestController)
+                labels += "<span class=\"label label-info\">Access Control</span>";
+
+            if (app.dnsApps[j].isAuthoritativeRequestHandler)
+                labels += "<span class=\"label label-info\">Authoritative</span>";
+
+            if (app.dnsApps[j].isQueryLogger)
+                labels += "<span class=\"label label-info\">Query Logs</span>";
+
+            if (labels == "")
+                labels = "<span class=\"label label-info\">Generic</span>";
+
+            if (description == null)
+                description = htmlEncode(app.dnsApps[j].description).replace(/\n/g, "<br />");
+
+            dnsAppsTable += "<tr><td>" + htmlEncode(app.dnsApps[j].classPath) + "</br>" + labels + "</td><td>" + description + "</td></tr>";
+        }
+
+        dnsAppsTable += "</tbody></table>"
+    }
+
+    var id = getAppRowId(name);
+    var tableHtmlRow = "<tr id=\"trApp" + id + "\"><td><div style=\"margin-bottom: 20px;\"><span style=\"font-weight: bold; font-size: 16px;\">" + htmlEncode(name) + "</span><br /><span id=\"trAppVersion" + id + "\" class=\"label label-primary\">Version " + htmlEncode(version) + "</span> <span id=\"trAppUpdateVersion" + id + "\" class=\"label label-warning\" style=\"" + (updateAvailable ? "" : "display: none;") + "\">Update " + htmlEncode(updateVersion) + "</span></div>";
+
+    if (dnsAppsTable != null)
+        tableHtmlRow += dnsAppsTable;
+
+    tableHtmlRow += "</td>";
+    tableHtmlRow += "<td><button type=\"button\" class=\"btn btn-default\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; display: block;\" onclick=\"showAppConfigModal(this, '" + name + "');\" data-loading-text=\"Loading...\">Config</button>";
+    tableHtmlRow += "<button type=\"button\" class=\"btn btn-warning\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; display: block;\" onclick=\"showUpdateAppModal('" + name + "');\">Update</button>";
+    tableHtmlRow += "<button id=\"btnAppsStoreUpdate" + id + "\" type=\"button\" data-id=\"" + id + "\" class=\"btn btn-warning\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; " + (updateAvailable ? "" : "display: none;") + "\" onclick=\"updateStoreApp(this, '" + name + "', '" + updateUrl + "', false);\" data-loading-text=\"Updating...\">Store Update</button>";
+    tableHtmlRow += "<button type=\"button\" data-id=\"" + id + "\" class=\"btn btn-danger\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; display: block;\" onclick=\"uninstallApp(this, '" + name + "');\" data-loading-text=\"Uninstalling...\">Uninstall</button></td></tr>";
+
+    return tableHtmlRow
+}
+
 function showStoreAppsModal() {
     var divStoreAppsAlert = $("#divStoreAppsAlert");
     var divStoreAppsLoader = $("#divStoreAppsLoader");
@@ -117,7 +127,7 @@ function showStoreAppsModal() {
     $("#modalStoreApps").modal("show");
 
     HTTPRequest({
-        url: "/api/apps/listStoreApps?token=" + token,
+        url: "/api/apps/listStoreApps?token=" + sessionData.token,
         success: function (responseJSON) {
             var storeApps = responseJSON.response.storeApps;
             var tableHtmlRows = "";
@@ -196,7 +206,7 @@ function installStoreApp(objBtn, appName, url) {
     btn.button('loading');
 
     HTTPRequest({
-        url: "/api/apps/downloadAndInstall?token=" + token + "&name=" + encodeURIComponent(appName) + "&url=" + encodeURIComponent(url),
+        url: "/api/apps/downloadAndInstall?token=" + sessionData.token + "&name=" + encodeURIComponent(appName) + "&url=" + encodeURIComponent(url),
         success: function (responseJSON) {
             btn.button('reset');
             btn.hide();
@@ -204,9 +214,11 @@ function installStoreApp(objBtn, appName, url) {
             var id = btn.attr("data-id");
             $("#btnStoreAppUninstall" + id).show();
 
-            refreshApps();
+            var tableHtmlRow = getAppRowHtml(responseJSON.response.installedApp);
+            $("#tableAppsBody").prepend(tableHtmlRow);
+            updateAppsFooterCount();
 
-            showAlert("success", "Store App Installed!", "DNS application was installed successfully from DNS App Store.", divStoreAppsAlert);
+            showAlert("success", "Store App Installed!", "DNS application '" + appName + "' was installed successfully from DNS App Store.", divStoreAppsAlert);
         },
         error: function () {
             btn.button('reset');
@@ -230,26 +242,22 @@ function updateStoreApp(objBtn, appName, url, isModal) {
     btn.button('loading');
 
     HTTPRequest({
-        url: "/api/apps/downloadAndUpdate?token=" + token + "&name=" + encodeURIComponent(appName) + "&url=" + encodeURIComponent(url),
+        url: "/api/apps/downloadAndUpdate?token=" + sessionData.token + "&name=" + encodeURIComponent(appName) + "&url=" + encodeURIComponent(url),
         success: function (responseJSON) {
             btn.button('reset');
             btn.hide();
 
-            var id = btn.attr("data-id");
-
             if (isModal) {
+                var id = btn.attr("data-id");
                 $("#spanStoreAppUpdateVersion" + id).hide();
                 $("#spanStoreAppDisplayVersion" + id).text($("#spanStoreAppUpdateVersion" + id).text().replace(/Update/g, "Version"));
-
-                refreshApps();
-            }
-            else {
-                $("#btnAppsStoreUpdate" + id).hide();
-                $("#trAppUpdateVersion" + id).hide();
-                $("#trAppVersion" + id).text($("#trAppUpdateVersion" + id).text().replace(/Update/g, "Version"));
             }
 
-            showAlert("success", "Store App Updated!", "DNS application was updated successfully from DNS App Store.", divStoreAppsAlert);
+            var tableHtmlRow = getAppRowHtml(responseJSON.response.updatedApp);
+            var id = getAppRowId(responseJSON.response.updatedApp.name);
+            $("#trApp" + id).replaceWith(tableHtmlRow);
+
+            showAlert("success", "Store App Updated!", "DNS application '" + appName + "' was updated successfully from DNS App Store.", divStoreAppsAlert);
         },
         error: function () {
             btn.button('reset');
@@ -272,7 +280,7 @@ function uninstallStoreApp(objBtn, appName) {
     btn.button('loading');
 
     HTTPRequest({
-        url: "/api/apps/uninstall?token=" + token + "&name=" + encodeURIComponent(appName),
+        url: "/api/apps/uninstall?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
         success: function (responseJSON) {
             btn.button('reset');
             btn.hide();
@@ -282,9 +290,11 @@ function uninstallStoreApp(objBtn, appName) {
             $("#btnStoreAppUpdate" + id).hide();
             $("#spanStoreAppVersion" + id).attr("class", "label label-primary");
 
-            refreshApps();
+            var id = getAppRowId(appName);
+            $("#trApp" + id).remove();
+            updateAppsFooterCount();
 
-            showAlert("success", "Store App Uninstalled!", "DNS application was uninstalled successfully.", divStoreAppsAlert);
+            showAlert("success", "Store App Uninstalled!", "DNS application '" + appName + "' was uninstalled successfully.", divStoreAppsAlert);
         },
         error: function () {
             btn.button('reset');
@@ -321,15 +331,17 @@ function installApp() {
     var btn = $("#btnInstallApp").button('loading');
 
     HTTPRequest({
-        url: "/api/apps/install?token=" + token + "&name=" + encodeURIComponent(appName),
+        url: "/api/apps/install?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
         data: formData,
-        dataIsFormData: true,
+        processData: false,
         success: function (responseJSON) {
             $("#modalInstallApp").modal("hide");
 
-            refreshApps();
+            var tableHtmlRow = getAppRowHtml(responseJSON.response.installedApp);
+            $("#tableAppsBody").prepend(tableHtmlRow);
+            updateAppsFooterCount();
 
-            showAlert("success", "App Installed!", "DNS application was installed successfully.");
+            showAlert("success", "App Installed!", "DNS application '" + appName + "' was installed successfully.");
         },
         error: function () {
             btn.button('reset');
@@ -359,15 +371,17 @@ function updateApp() {
     var btn = $("#btnUpdateApp").button('loading');
 
     HTTPRequest({
-        url: "/api/apps/update?token=" + token + "&name=" + encodeURIComponent(appName),
+        url: "/api/apps/update?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
         data: formData,
-        dataIsFormData: true,
+        processData: false,
         success: function (responseJSON) {
             $("#modalUpdateApp").modal("hide");
 
-            refreshApps();
+            var tableHtmlRow = getAppRowHtml(responseJSON.response.updatedApp);
+            var id = getAppRowId(responseJSON.response.updatedApp.name);
+            $("#trApp" + id).replaceWith(tableHtmlRow);
 
-            showAlert("success", "App Updated!", "DNS application was updated successfully.");
+            showAlert("success", "App Updated!", "DNS application '" + appName + "' was updated successfully.");
         },
         error: function () {
             btn.button('reset');
@@ -385,23 +399,16 @@ function uninstallApp(objBtn, appName) {
         return;
 
     var btn = $(objBtn);
-
     btn.button('loading');
 
     HTTPRequest({
-        url: "/api/apps/uninstall?token=" + token + "&name=" + encodeURIComponent(appName),
+        url: "/api/apps/uninstall?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
         success: function (responseJSON) {
             var id = btn.attr("data-id");
             $("#trApp" + id).remove();
+            updateAppsFooterCount();
 
-            var totalApps = $('#tableApps >tbody >tr').length;
-
-            if (totalApps > 0)
-                $("#tableAppsFooter").html("<tr><td colspan=\"3\"><b>Total Apps: " + totalApps + "</b></td></tr>");
-            else
-                $("#tableAppsFooter").html("<tr><td colspan=\"3\" align=\"center\">No App Found</td></tr>");
-
-            showAlert("success", "App Uninstalled!", "DNS application was uninstalled successfully.");
+            showAlert("success", "App Uninstalled!", "DNS application '" + appName + "' was uninstalled successfully.");
         },
         error: function () {
             btn.button('reset');
@@ -412,13 +419,21 @@ function uninstallApp(objBtn, appName) {
     });
 }
 
+function updateAppsFooterCount() {
+    var totalApps = $('#tableApps >tbody >tr').length;
+    if (totalApps > 0)
+        $("#tableAppsFooter").html("<tr><td colspan=\"3\"><b>Total Apps: " + totalApps + "</b></td></tr>");
+    else
+        $("#tableAppsFooter").html("<tr><td colspan=\"3\" align=\"center\">No App Found</td></tr>");
+}
+
 function showAppConfigModal(objBtn, appName) {
     var btn = $(objBtn);
 
     btn.button('loading');
 
     HTTPRequest({
-        url: "/api/apps/getConfig?token=" + token + "&name=" + encodeURIComponent(appName),
+        url: "/api/apps/config/get?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
         success: function (responseJSON) {
             btn.button('reset');
 
@@ -453,12 +468,13 @@ function saveAppConfig() {
     var btn = $("#btnAppConfig").button("loading");
 
     HTTPRequest({
-        url: "/api/apps/setConfig?token=" + token + "&name=" + encodeURIComponent(appName),
-        data: "config=" + config,
+        url: "/api/apps/config/set?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
+        data: "config=" + encodeURIComponent(config),
+        processData: false,
         success: function (responseJSON) {
             $("#modalAppConfig").modal("hide");
 
-            showAlert("success", "App Config Saved!", "The DNS application config was saved and reloaded successfully.");
+            showAlert("success", "App Config Saved!", "The DNS application '" + appName + "' config was saved and reloaded successfully.");
         },
         error: function () {
             btn.button('reset');

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,13 +22,12 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Dns.Zones
 {
-    class StubZone : AuthZone
+    class StubZone : ApexZone
     {
         #region variables
 
@@ -84,24 +83,32 @@ namespace DnsServerCore.Dns.Zones
 
             if (primaryNameServerAddresses == null)
             {
-                soaResponse = await stubZone._dnsServer.DirectQueryAsync(soaQuestion).WithTimeout(2000);
+                soaResponse = await stubZone._dnsServer.DirectQueryAsync(soaQuestion);
             }
             else
             {
                 DnsClient dnsClient = new DnsClient(primaryNameServerAddresses);
 
+                foreach (NameServerAddress nameServerAddress in dnsClient.Servers)
+                {
+                    if (nameServerAddress.IsIPEndPointStale)
+                        await nameServerAddress.ResolveIPAddressAsync(stubZone._dnsServer, stubZone._dnsServer.PreferIPv6);
+                }
+
                 dnsClient.Proxy = stubZone._dnsServer.Proxy;
                 dnsClient.PreferIPv6 = stubZone._dnsServer.PreferIPv6;
 
-                soaResponse = await dnsClient.ResolveAsync(soaQuestion);
+                DnsDatagram soaRequest = new DnsDatagram(0, false, DnsOpcode.StandardQuery, false, false, false, false, false, false, DnsResponseCode.NoError, new DnsQuestionRecord[] { soaQuestion }, null, null, null, DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE);
+
+                soaResponse = await dnsClient.ResolveAsync(soaRequest);
             }
 
             if ((soaResponse.Answer.Count == 0) || (soaResponse.Answer[0].Type != DnsResourceRecordType.SOA))
                 throw new DnsServerException("DNS Server failed to find SOA record for: " + name);
 
-            DnsSOARecord receivedSoa = soaResponse.Answer[0].RDATA as DnsSOARecord;
+            DnsSOARecordData receivedSoa = soaResponse.Answer[0].RDATA as DnsSOARecordData;
 
-            DnsSOARecord soa = new DnsSOARecord(receivedSoa.PrimaryNameServer, receivedSoa.ResponsiblePerson, 0u, receivedSoa.Refresh, receivedSoa.Retry, receivedSoa.Expire, receivedSoa.Minimum);
+            DnsSOARecordData soa = new DnsSOARecordData(receivedSoa.PrimaryNameServer, receivedSoa.ResponsiblePerson, 0u, receivedSoa.Refresh, receivedSoa.Retry, receivedSoa.Expire, receivedSoa.Minimum);
             DnsResourceRecord[] soaRR = new DnsResourceRecord[] { new DnsResourceRecord(stubZone._name, DnsResourceRecordType.SOA, DnsClass.IN, soa.Refresh, soa) };
 
             if (!string.IsNullOrEmpty(primaryNameServerAddresses))
@@ -123,22 +130,29 @@ namespace DnsServerCore.Dns.Zones
 
         protected override void Dispose(bool disposing)
         {
-            if (_disposed)
-                return;
-
-            if (disposing)
+            try
             {
-                lock (_refreshTimerLock)
+                if (_disposed)
+                    return;
+
+                if (disposing)
                 {
-                    if (_refreshTimer != null)
+                    lock (_refreshTimerLock)
                     {
-                        _refreshTimer.Dispose();
-                        _refreshTimer = null;
+                        if (_refreshTimer != null)
+                        {
+                            _refreshTimer.Dispose();
+                            _refreshTimer = null;
+                        }
                     }
                 }
-            }
 
-            _disposed = true;
+                _disposed = true;
+            }
+            finally
+            {
+                base.Dispose(disposing);
+            }
         }
 
         #endregion
@@ -154,28 +168,29 @@ namespace DnsServerCore.Dns.Zones
 
                 _isExpired = DateTime.UtcNow > _expiry;
 
-                //get all name server addresses
-                IReadOnlyList<NameServerAddress> nameServers = await GetAllNameServerAddressesAsync(_dnsServer);
+                //get primary name server addresses
+                IReadOnlyList<NameServerAddress> primaryNameServers = await GetPrimaryNameServerAddressesAsync(_dnsServer);
 
-                if (nameServers.Count == 0)
+                if (primaryNameServers.Count == 0)
                 {
                     LogManager log = _dnsServer.LogManager;
                     if (log != null)
-                        log.Write("DNS Server could not find name server IP addresses for stub zone: " + (_name == "" ? "<root>" : _name));
+                        log.Write("DNS Server could not find primary name server IP addresses for stub zone: " + (_name == "" ? "<root>" : _name));
 
                     //set timer for retry
-                    DnsSOARecord soa1 = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecord;
+                    DnsSOARecordData soa1 = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecordData;
                     ResetRefreshTimer(soa1.Retry * 1000);
+                    _syncFailed = true;
                     return;
                 }
 
                 //refresh zone
-                if (await RefreshZoneAsync(nameServers))
+                if (await RefreshZoneAsync(primaryNameServers))
                 {
                     //zone refreshed; set timer for refresh
-                    DnsSOARecord latestSoa = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecord;
+                    DnsSOARecordData latestSoa = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecordData;
                     ResetRefreshTimer(latestSoa.Refresh * 1000);
-
+                    _syncFailed = false;
                     _expiry = DateTime.UtcNow.AddSeconds(latestSoa.Expire);
                     _isExpired = false;
                     _resync = false;
@@ -184,8 +199,9 @@ namespace DnsServerCore.Dns.Zones
                 }
 
                 //no response from any of the name servers; set timer for retry
-                DnsSOARecord soa = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecord;
+                DnsSOARecordData soa = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecordData;
                 ResetRefreshTimer(soa.Retry * 1000);
+                _syncFailed = true;
             }
             catch (Exception ex)
             {
@@ -194,8 +210,9 @@ namespace DnsServerCore.Dns.Zones
                     log.Write(ex);
 
                 //set timer for retry
-                DnsSOARecord soa = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecord;
+                DnsSOARecordData soa = _entries[DnsResourceRecordType.SOA][0].RDATA as DnsSOARecordData;
                 ResetRefreshTimer(soa.Retry * 1000);
+                _syncFailed = true;
             }
             finally
             {
@@ -230,7 +247,7 @@ namespace DnsServerCore.Dns.Zones
                 client.Retries = REFRESH_RETRIES;
                 client.Concurrency = 1;
 
-                DnsDatagram soaRequest = new DnsDatagram(0, false, DnsOpcode.StandardQuery, false, false, false, false, false, false, DnsResponseCode.NoError, new DnsQuestionRecord[] { new DnsQuestionRecord(_name, DnsResourceRecordType.SOA, DnsClass.IN) });
+                DnsDatagram soaRequest = new DnsDatagram(0, false, DnsOpcode.StandardQuery, false, false, false, false, false, false, DnsResponseCode.NoError, new DnsQuestionRecord[] { new DnsQuestionRecord(_name, DnsResourceRecordType.SOA, DnsClass.IN) }, null, null, null, DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE);
                 DnsDatagram soaResponse = await client.ResolveAsync(soaRequest);
 
                 if (soaResponse.RCODE != DnsResponseCode.NoError)
@@ -254,8 +271,8 @@ namespace DnsServerCore.Dns.Zones
                 DnsResourceRecord currentSoaRecord = _entries[DnsResourceRecordType.SOA][0];
                 DnsResourceRecord receivedSoaRecord = soaResponse.Answer[0];
 
-                DnsSOARecord currentSoa = currentSoaRecord.RDATA as DnsSOARecord;
-                DnsSOARecord receivedSoa = receivedSoaRecord.RDATA as DnsSOARecord;
+                DnsSOARecordData currentSoa = currentSoaRecord.RDATA as DnsSOARecordData;
+                DnsSOARecordData receivedSoa = receivedSoaRecord.RDATA as DnsSOARecordData;
 
                 //compare using sequence space arithmetic
                 if (!_resync && !currentSoa.IsZoneUpdateAvailable(receivedSoa))
@@ -308,7 +325,7 @@ namespace DnsServerCore.Dns.Zones
 
                 foreach (DnsResourceRecord record in nsResponse.Answer)
                 {
-                    if ((record.Type == DnsResourceRecordType.NS) && record.Name.Equals(_name))
+                    if ((record.Type == DnsResourceRecordType.NS) && record.Name.Equals(_name, StringComparison.OrdinalIgnoreCase))
                     {
                         record.SyncGlueRecords(nsResponse.Additional);
                         nsRecords.Add(record);
@@ -418,7 +435,7 @@ namespace DnsServerCore.Dns.Zones
             throw new InvalidOperationException("Cannot update record in stub zone.");
         }
 
-        public override IReadOnlyList<DnsResourceRecord> QueryRecords(DnsResourceRecordType type)
+        public override IReadOnlyList<DnsResourceRecord> QueryRecords(DnsResourceRecordType type, bool dnssecOk)
         {
             return Array.Empty<DnsResourceRecord>(); //stub zone has no authority so cant return any records as query response to allow generating referral response
         }
@@ -459,6 +476,12 @@ namespace DnsServerCore.Dns.Zones
         public override AuthZoneNotify Notify
         {
             get { return _notify; }
+            set { throw new InvalidOperationException(); }
+        }
+
+        public override AuthZoneUpdate Update
+        {
+            get { return _update; }
             set { throw new InvalidOperationException(); }
         }
 

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -21,10 +21,12 @@ using DnsServerCore.ApplicationCommon;
 using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DropRequests
 {
@@ -33,6 +35,7 @@ namespace DropRequests
         #region variables
 
         bool _enableBlocking;
+        bool _dropMalformedRequests;
         IReadOnlyList<NetworkAddress> _allowedNetworks;
         IReadOnlyList<NetworkAddress> _blockedNetworks;
         IReadOnlyList<BlockedQuestion> _blockedQuestions;
@@ -50,11 +53,16 @@ namespace DropRequests
 
         #region public
 
-        public Task InitializeAsync(IDnsServer dnsServer, string config)
+        public async Task InitializeAsync(IDnsServer dnsServer, string config)
         {
             dynamic jsonConfig = JsonConvert.DeserializeObject(config);
 
             _enableBlocking = jsonConfig.enableBlocking.Value;
+
+            if (jsonConfig.dropMalformedRequests is null)
+                _dropMalformedRequests = false;
+            else
+                _dropMalformedRequests = jsonConfig.dropMalformedRequests.Value;
 
             if (jsonConfig.allowedNetworks is null)
             {
@@ -104,13 +112,21 @@ namespace DropRequests
                 _blockedQuestions = blockedQuestions;
             }
 
-            return Task.CompletedTask;
+            if (jsonConfig.dropMalformedRequests is null)
+            {
+                config = config.Replace("\"allowedNetworks\"", "\"dropMalformedRequests\": false,\r\n  \"allowedNetworks\"");
+
+                await File.WriteAllTextAsync(Path.Combine(dnsServer.ApplicationFolder, "dnsApp.config"), config);
+            }
         }
 
         public Task<DnsRequestControllerAction> GetRequestActionAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol)
         {
             if (!_enableBlocking)
                 return Task.FromResult(DnsRequestControllerAction.Allow);
+
+            if (_dropMalformedRequests && (request.ParsingException is not null))
+                return Task.FromResult(DnsRequestControllerAction.DropSilently);
 
             IPAddress remoteIp = remoteEP.Address;
 
@@ -154,6 +170,7 @@ namespace DropRequests
             #region variables
 
             readonly string _name;
+            readonly bool _blockZone;
             readonly DnsResourceRecordType _type;
 
             #endregion
@@ -163,6 +180,11 @@ namespace DropRequests
             public BlockedQuestion(dynamic jsonQuestion)
             {
                 _name = jsonQuestion.name?.Value;
+                if (_name is not null)
+                    _name = _name.TrimEnd('.');
+
+                if (jsonQuestion.blockZone is not null)
+                    _blockZone = jsonQuestion.blockZone.Value;
 
                 string strType = jsonQuestion.type?.Value;
                 if (!string.IsNullOrEmpty(strType) && Enum.TryParse(strType, true, out DnsResourceRecordType type))
@@ -177,8 +199,19 @@ namespace DropRequests
 
             public bool Matches(DnsQuestionRecord question)
             {
-                if ((_name is not null) && !_name.Equals(question.Name, StringComparison.OrdinalIgnoreCase))
-                    return false;
+                if (_name is not null)
+                {
+                    if (_blockZone)
+                    {
+                        if ((_name.Length > 0) && !_name.Equals(question.Name, StringComparison.OrdinalIgnoreCase) && !question.Name.EndsWith("." + _name, StringComparison.OrdinalIgnoreCase))
+                            return false;
+                    }
+                    else
+                    {
+                        if (!_name.Equals(question.Name, StringComparison.OrdinalIgnoreCase))
+                            return false;
+                    }
+                }
 
                 if ((_type != DnsResourceRecordType.Unknown) && (_type != question.Type))
                     return false;

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -44,11 +44,11 @@ namespace SplitHorizon
 
         public Task InitializeAsync(IDnsServer dnsServer, string config)
         {
-            //no config needed
+            //SimpleAddress loads the shared config
             return Task.CompletedTask;
         }
 
-        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, uint appRecordTtl, string appRecordData)
+        public Task<DnsDatagram> ProcessRequestAsync(DnsDatagram request, IPEndPoint remoteEP, DnsTransportProtocol protocol, bool isRecursionAllowed, string zoneName, string appRecordName, uint appRecordTtl, string appRecordData)
         {
             dynamic jsonAppRecordData = JsonConvert.DeserializeObject(appRecordData);
             dynamic jsonCname = null;
@@ -60,11 +60,27 @@ namespace SplitHorizon
                 if ((name == "public") || (name == "private"))
                     continue;
 
-                NetworkAddress networkAddress = NetworkAddress.Parse(name);
-                if (networkAddress.Contains(remoteEP.Address))
+                if (SimpleAddress.Networks.TryGetValue(name, out List<NetworkAddress> networkAddresses))
                 {
-                    jsonCname = jsonProperty.Value;
-                    break;
+                    foreach (NetworkAddress networkAddress in networkAddresses)
+                    {
+                        if (networkAddress.Contains(remoteEP.Address))
+                        {
+                            jsonCname = jsonProperty.Value;
+                            break;
+                        }
+                    }
+
+                    if (jsonCname is not null)
+                        break;
+                }
+                else if (NetworkAddress.TryParse(name, out NetworkAddress networkAddress))
+                {
+                    if (networkAddress.Contains(remoteEP.Address))
+                    {
+                        jsonCname = jsonProperty.Value;
+                        break;
+                    }
                 }
             }
 
@@ -87,9 +103,9 @@ namespace SplitHorizon
             IReadOnlyList<DnsResourceRecord> answers;
 
             if (question.Name.Equals(zoneName, StringComparison.OrdinalIgnoreCase)) //check for zone apex
-                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.ANAME, DnsClass.IN, appRecordTtl, new DnsANAMERecord(cname)) }; //use ANAME
+                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.ANAME, DnsClass.IN, appRecordTtl, new DnsANAMERecordData(cname)) }; //use ANAME
             else
-                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.CNAME, DnsClass.IN, appRecordTtl, new DnsCNAMERecord(cname)) };
+                answers = new DnsResourceRecord[] { new DnsResourceRecord(question.Name, DnsResourceRecordType.CNAME, DnsClass.IN, appRecordTtl, new DnsCNAMERecordData(cname)) };
 
             return Task.FromResult(new DnsDatagram(request.Identifier, true, request.OPCODE, true, false, request.RecursionDesired, isRecursionAllowed, false, false, DnsResponseCode.NoError, request.Question, answers));
         }
@@ -108,6 +124,7 @@ namespace SplitHorizon
                 return @"{
   ""public"": ""api.example.com"",
   ""private"": ""api.example.corp"",
+  ""custom-networks"": ""custom.example.corp"",
   ""10.0.0.0/8"": ""api.intranet.example.corp""
 }";
             }

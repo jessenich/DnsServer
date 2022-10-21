@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -28,6 +28,7 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace QueryLogsSqlite
 {
@@ -420,7 +421,17 @@ CREATE TABLE IF NOT EXISTS dns_logs
                 whereClause += "rcode = @rcode AND ";
 
             if (qname is not null)
-                whereClause += "qname = @qname AND ";
+            {
+                if (qname.Contains('*'))
+                {
+                    whereClause += "qname like @qname AND ";
+                    qname = qname.Replace("*", "%");
+                }
+                else
+                {
+                    whereClause += "qname = @qname AND ";
+                }
+            }
 
             if (qtype is not null)
                 whereClause += "qtype = @qtype AND ";
@@ -499,7 +510,7 @@ CREATE TABLE IF NOT EXISTS dns_logs
 SELECT * FROM (
     SELECT
         ROW_NUMBER() OVER ( 
-            ORDER BY timestamp
+            ORDER BY dlid
         ) row_num,
         timestamp,
         client_ip,
@@ -513,11 +524,10 @@ SELECT * FROM (
     FROM
         dns_logs
 " + (string.IsNullOrEmpty(whereClause) ? "" : "WHERE " + whereClause) + @"
-    ORDER BY row_num" + (descendingOrder ? " DESC" : "") + @"
 ) t
 WHERE 
     row_num > @start_row_num AND row_num <= @end_row_num
-";
+ORDER BY row_num" + (descendingOrder ? " DESC" : "");
 
                     command.Parameters.AddWithValue("@start_row_num", startRowNum);
                     command.Parameters.AddWithValue("@end_row_num", endRowNum);
@@ -558,7 +568,7 @@ WHERE
                             if (reader.IsDBNull(6))
                                 question = null;
                             else
-                                question = new DnsQuestionRecord(reader.GetString(6), (DnsResourceRecordType)reader.GetInt32(7), (DnsClass)reader.GetInt32(8));
+                                question = new DnsQuestionRecord(reader.GetString(6), (DnsResourceRecordType)reader.GetInt32(7), (DnsClass)reader.GetInt32(8), false);
 
                             string answer;
 
