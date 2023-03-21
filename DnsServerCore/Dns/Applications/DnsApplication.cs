@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2021  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,6 +22,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.Loader;
 using System.Threading.Tasks;
 
 namespace DnsServerCore.Dns.Applications
@@ -35,12 +36,14 @@ namespace DnsServerCore.Dns.Applications
 
         readonly DnsApplicationAssemblyLoadContext _appContext;
 
+        readonly string _description;
         readonly Version _version;
         readonly IReadOnlyDictionary<string, IDnsApplication> _dnsApplications;
         readonly IReadOnlyDictionary<string, IDnsAppRecordRequestHandler> _dnsAppRecordRequestHandlers;
         readonly IReadOnlyDictionary<string, IDnsRequestController> _dnsRequestControllers;
         readonly IReadOnlyDictionary<string, IDnsAuthoritativeRequestHandler> _dnsAuthoritativeRequestHandlers;
         readonly IReadOnlyDictionary<string, IDnsQueryLogger> _dnsQueryLoggers;
+        readonly IReadOnlyDictionary<string, IDnsPostProcessor> _dnsPostProcessors;
 
         #endregion
 
@@ -54,7 +57,7 @@ namespace DnsServerCore.Dns.Applications
             _appContext = new DnsApplicationAssemblyLoadContext(_dnsServer.ApplicationFolder);
 
             //load app assemblies
-            Assembly[] loadedAssemblies = AppDomain.CurrentDomain.GetAssemblies();
+            IEnumerable<Assembly> loadedAssemblies = AssemblyLoadContext.Default.Assemblies;
             List<Assembly> appAssemblies = new List<Assembly>();
 
             foreach (string dllFile in Directory.GetFiles(_dnsServer.ApplicationFolder, "*.dll", SearchOption.TopDirectoryOnly))
@@ -65,20 +68,23 @@ namespace DnsServerCore.Dns.Applications
 
                 foreach (Assembly loadedAssembly in loadedAssemblies)
                 {
-                    AssemblyName assemblyName = loadedAssembly.GetName();
-
-                    if (assemblyName.CodeBase != null)
+                    if (!string.IsNullOrEmpty(loadedAssembly.Location))
                     {
-                        if (Path.GetFileNameWithoutExtension(assemblyName.CodeBase).Equals(dllFileName, StringComparison.OrdinalIgnoreCase))
+                        if (Path.GetFileNameWithoutExtension(loadedAssembly.Location).Equals(dllFileName, StringComparison.OrdinalIgnoreCase))
                         {
                             isLoaded = true;
                             break;
                         }
                     }
-                    else if ((assemblyName.Name != null) && assemblyName.Name.Equals(dllFileName, StringComparison.OrdinalIgnoreCase))
+                    else
                     {
-                        isLoaded = true;
-                        break;
+                        AssemblyName assemblyName = loadedAssembly.GetName();
+
+                        if ((assemblyName.Name != null) && assemblyName.Name.Equals(dllFileName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            isLoaded = true;
+                            break;
+                        }
                     }
                 }
 
@@ -119,6 +125,7 @@ namespace DnsServerCore.Dns.Applications
             Dictionary<string, IDnsRequestController> dnsRequestControllers = new Dictionary<string, IDnsRequestController>(1);
             Dictionary<string, IDnsAuthoritativeRequestHandler> dnsAuthoritativeRequestHandlers = new Dictionary<string, IDnsAuthoritativeRequestHandler>(1);
             Dictionary<string, IDnsQueryLogger> dnsQueryLoggers = new Dictionary<string, IDnsQueryLogger>(1);
+            Dictionary<string, IDnsPostProcessor> dnsPostProcessors = new Dictionary<string, IDnsPostProcessor>(1);
 
             Type dnsApplicationInterface = typeof(IDnsApplication);
 
@@ -159,6 +166,16 @@ namespace DnsServerCore.Dns.Applications
                                 if (app is IDnsQueryLogger logger)
                                     dnsQueryLoggers.Add(classType.FullName, logger);
 
+                                if (app is IDnsPostProcessor postProcessor)
+                                    dnsPostProcessors.Add(classType.FullName, postProcessor);
+
+                                if (_description is null)
+                                {
+                                    AssemblyDescriptionAttribute attribute = appAssembly.GetCustomAttribute<AssemblyDescriptionAttribute>();
+                                    if (attribute is not null)
+                                        _description = attribute.Description.Replace("\\n", "\n");
+                                }
+
                                 if (_version is null)
                                     _version = appAssembly.GetName().Version;
                             }
@@ -188,6 +205,7 @@ namespace DnsServerCore.Dns.Applications
             _dnsRequestControllers = dnsRequestControllers;
             _dnsAuthoritativeRequestHandlers = dnsAuthoritativeRequestHandlers;
             _dnsQueryLoggers = dnsQueryLoggers;
+            _dnsPostProcessors = dnsPostProcessors;
         }
 
         #endregion
@@ -279,6 +297,9 @@ namespace DnsServerCore.Dns.Applications
         public string Name
         { get { return _name; } }
 
+        public string Description
+        { get { return _description; } }
+
         public Version Version
         { get { return _version; } }
 
@@ -296,6 +317,9 @@ namespace DnsServerCore.Dns.Applications
 
         public IReadOnlyDictionary<string, IDnsQueryLogger> DnsQueryLoggers
         { get { return _dnsQueryLoggers; } }
+
+        public IReadOnlyDictionary<string, IDnsPostProcessor> DnsPostProcessors
+        { get { return _dnsPostProcessors; } }
 
         #endregion
     }

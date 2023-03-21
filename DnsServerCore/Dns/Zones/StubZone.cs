@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,6 +22,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using TechnitiumLibrary;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
@@ -68,6 +69,7 @@ namespace DnsServerCore.Dns.Zones
 
             _zoneTransfer = AuthZoneTransfer.Deny;
             _notify = AuthZoneNotify.None;
+            _update = AuthZoneUpdate.Deny;
         }
 
         #endregion
@@ -80,14 +82,25 @@ namespace DnsServerCore.Dns.Zones
 
             DnsQuestionRecord soaQuestion = new DnsQuestionRecord(name, DnsResourceRecordType.SOA, DnsClass.IN);
             DnsDatagram soaResponse;
+            NameServerAddress[] primaryNameServers = null;
 
-            if (primaryNameServerAddresses == null)
+            if (string.IsNullOrEmpty(primaryNameServerAddresses))
             {
                 soaResponse = await stubZone._dnsServer.DirectQueryAsync(soaQuestion);
             }
             else
             {
-                DnsClient dnsClient = new DnsClient(primaryNameServerAddresses);
+                primaryNameServers = primaryNameServerAddresses.Split(delegate (string address)
+                {
+                    NameServerAddress nameServer = NameServerAddress.Parse(address);
+
+                    if (nameServer.Protocol != DnsTransportProtocol.Udp)
+                        nameServer = nameServer.ChangeProtocol(DnsTransportProtocol.Udp);
+
+                    return nameServer;
+                }, ',');
+
+                DnsClient dnsClient = new DnsClient(primaryNameServers);
 
                 foreach (NameServerAddress nameServerAddress in dnsClient.Servers)
                 {
@@ -98,7 +111,7 @@ namespace DnsServerCore.Dns.Zones
                 dnsClient.Proxy = stubZone._dnsServer.Proxy;
                 dnsClient.PreferIPv6 = stubZone._dnsServer.PreferIPv6;
 
-                DnsDatagram soaRequest = new DnsDatagram(0, false, DnsOpcode.StandardQuery, false, false, false, false, false, false, DnsResponseCode.NoError, new DnsQuestionRecord[] { soaQuestion }, null, null, null, DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE);
+                DnsDatagram soaRequest = new DnsDatagram(0, false, DnsOpcode.StandardQuery, false, false, false, false, false, false, DnsResponseCode.NoError, new DnsQuestionRecord[] { soaQuestion }, null, null, null, dnsServer.UdpPayloadSize);
 
                 soaResponse = await dnsClient.ResolveAsync(soaRequest);
             }
@@ -111,8 +124,8 @@ namespace DnsServerCore.Dns.Zones
             DnsSOARecordData soa = new DnsSOARecordData(receivedSoa.PrimaryNameServer, receivedSoa.ResponsiblePerson, 0u, receivedSoa.Refresh, receivedSoa.Retry, receivedSoa.Expire, receivedSoa.Minimum);
             DnsResourceRecord[] soaRR = new DnsResourceRecord[] { new DnsResourceRecord(stubZone._name, DnsResourceRecordType.SOA, DnsClass.IN, soa.Refresh, soa) };
 
-            if (!string.IsNullOrEmpty(primaryNameServerAddresses))
-                soaRR[0].SetPrimaryNameServers(primaryNameServerAddresses);
+            if (primaryNameServers is not null)
+                soaRR[0].GetAuthRecordInfo().PrimaryNameServers = primaryNameServers;
 
             stubZone._entries[DnsResourceRecordType.SOA] = soaRR;
 
@@ -247,14 +260,14 @@ namespace DnsServerCore.Dns.Zones
                 client.Retries = REFRESH_RETRIES;
                 client.Concurrency = 1;
 
-                DnsDatagram soaRequest = new DnsDatagram(0, false, DnsOpcode.StandardQuery, false, false, false, false, false, false, DnsResponseCode.NoError, new DnsQuestionRecord[] { new DnsQuestionRecord(_name, DnsResourceRecordType.SOA, DnsClass.IN) }, null, null, null, DnsDatagram.EDNS_DEFAULT_UDP_PAYLOAD_SIZE);
+                DnsDatagram soaRequest = new DnsDatagram(0, false, DnsOpcode.StandardQuery, false, false, false, false, false, false, DnsResponseCode.NoError, new DnsQuestionRecord[] { new DnsQuestionRecord(_name, DnsResourceRecordType.SOA, DnsClass.IN) }, null, null, null, _dnsServer.UdpPayloadSize);
                 DnsDatagram soaResponse = await client.ResolveAsync(soaRequest);
 
                 if (soaResponse.RCODE != DnsResponseCode.NoError)
                 {
                     LogManager log = _dnsServer.LogManager;
                     if (log != null)
-                        log.Write("DNS Server received RCODE=" + soaResponse.RCODE.ToString() + " for '" + (_name == "" ? "<root>" : _name) + "' stub zone refresh from: " + soaResponse.Metadata.NameServerAddress.ToString());
+                        log.Write("DNS Server received RCODE=" + soaResponse.RCODE.ToString() + " for '" + (_name == "" ? "<root>" : _name) + "' stub zone refresh from: " + soaResponse.Metadata.NameServer.ToString());
 
                     return false;
                 }
@@ -263,7 +276,7 @@ namespace DnsServerCore.Dns.Zones
                 {
                     LogManager log = _dnsServer.LogManager;
                     if (log != null)
-                        log.Write("DNS Server received an empty response for SOA query for '" + (_name == "" ? "<root>" : _name) + "' stub zone refresh from: " + soaResponse.Metadata.NameServerAddress.ToString());
+                        log.Write("DNS Server received an empty response for SOA query for '" + (_name == "" ? "<root>" : _name) + "' stub zone refresh from: " + soaResponse.Metadata.NameServer.ToString());
 
                     return false;
                 }
@@ -279,7 +292,7 @@ namespace DnsServerCore.Dns.Zones
                 {
                     LogManager log = _dnsServer.LogManager;
                     if (log != null)
-                        log.Write("DNS Server successfully checked for '" + (_name == "" ? "<root>" : _name) + "' stub zone update from: " + soaResponse.Metadata.NameServerAddress.ToString());
+                        log.Write("DNS Server successfully checked for '" + (_name == "" ? "<root>" : _name) + "' stub zone update from: " + soaResponse.Metadata.NameServer.ToString());
 
                     return true;
                 }
@@ -290,8 +303,7 @@ namespace DnsServerCore.Dns.Zones
                 foreach (NameServerAddress nameServer in nameServers)
                     tcpNameServers.Add(nameServer.ChangeProtocol(DnsTransportProtocol.Tcp));
 
-                nameServers = tcpNameServers;
-                client = new DnsClient(nameServers);
+                client = new DnsClient(tcpNameServers);
 
                 client.Proxy = _dnsServer.Proxy;
                 client.PreferIPv6 = _dnsServer.PreferIPv6;
@@ -306,7 +318,7 @@ namespace DnsServerCore.Dns.Zones
                 {
                     LogManager log = _dnsServer.LogManager;
                     if (log != null)
-                        log.Write("DNS Server received RCODE=" + nsResponse.RCODE.ToString() + " for '" + (_name == "" ? "<root>" : _name) + "' stub zone refresh from: " + nsResponse.Metadata.NameServerAddress.ToString());
+                        log.Write("DNS Server received RCODE=" + nsResponse.RCODE.ToString() + " for '" + (_name == "" ? "<root>" : _name) + "' stub zone refresh from: " + nsResponse.Metadata.NameServer.ToString());
 
                     return false;
                 }
@@ -315,7 +327,7 @@ namespace DnsServerCore.Dns.Zones
                 {
                     LogManager log = _dnsServer.LogManager;
                     if (log != null)
-                        log.Write("DNS Server received an empty response for NS query for '" + (_name == "" ? "<root>" : _name) + "' stub zone from: " + nsResponse.Metadata.NameServerAddress.ToString());
+                        log.Write("DNS Server received an empty response for NS query for '" + (_name == "" ? "<root>" : _name) + "' stub zone from: " + nsResponse.Metadata.NameServer.ToString());
 
                     return false;
                 }
@@ -341,7 +353,7 @@ namespace DnsServerCore.Dns.Zones
                 {
                     LogManager log = _dnsServer.LogManager;
                     if (log != null)
-                        log.Write("DNS Server successfully refreshed '" + (_name == "" ? "<root>" : _name) + "' stub zone from: " + nsResponse.Metadata.NameServerAddress.ToString());
+                        log.Write("DNS Server successfully refreshed '" + (_name == "" ? "<root>" : _name) + "' stub zone from: " + nsResponse.Metadata.NameServer.ToString());
                 }
 
                 return true;
@@ -361,8 +373,7 @@ namespace DnsServerCore.Dns.Zones
                             strNameServers += ", " + nameServer.ToString();
                     }
 
-                    log.Write("DNS Server failed to refresh '" + (_name == "" ? "<root>" : _name) + "' stub zone from: " + strNameServers);
-                    log.Write(ex);
+                    log.Write("DNS Server failed to refresh '" + (_name == "" ? "<root>" : _name) + "' stub zone from: " + strNameServers + "\r\n" + ex.ToString());
                 }
 
                 return false;

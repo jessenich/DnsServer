@@ -1,5 +1,88 @@
 # Technitium DNS Server Change Log
 
+## Version 11.0.3
+Release Date: 11 March 2023
+
+- Fixed DoS vulnerability reported by Xiang Li, [Network and Information Security Lab, Tsinghua University](https://netsec.ccert.edu.cn/) that an attacker can use to send bad-formatted UDP packet to cause the outbound requests to fail to resolve due to insufficient validation.
+- Fixed issue reported by Xiang Li, [Network and Information Security Lab, Tsinghua University](https://netsec.ccert.edu.cn/) that caused conditional forwarder to not honoring RD flag in requests.
+- Fixed issue reported by Xiang Li, [Network and Information Security Lab, Tsinghua University](https://netsec.ccert.edu.cn/) that made amplification attacks more effective due to max 4096 bytes limit for responses.
+- Fixed issue in loading of Allowed and Blocked zones that resulted in loading to take too much time caused due to indexing feature added in last update for authoritative zones.
+- Updated DNS server UDP response processing to remove glue records for MX responses and try again to send it instead of sending a truncated response that was causing issue with some old mail servers that did not perform follow up request over TCP.
+- Block Page App: Updated the app to support option to disable the web server without requiring to uninstall the app to stop the web server.
+- Multiple other minor bug fixes and improvements.
+
+## Version 11.0.2
+Release Date: 26 February 2023
+
+- Fixed issue with DNS-over-HTTP private IP check that was causing 403 response when using with reverse proxy.
+- Fixed issue with zone record pagination caused when zone has no records.
+
+## Version 11.0.1
+Release Date: 25 February 2023
+
+- Changed allow list implementation to handle them separately and show allow list count on Dashboard.
+- Fixed bug in conditional forwarder zone for root zone that caused the DNS server to return RCODE=ServerFailure.
+- Fixed issues with DNS server's App request query handling sequence to fix issues with Advanced Forwarding app.
+- Fixed issues with block list parser to detect in-line comments.
+- Fixed issue of "URI too long" in save DHCP scope action.
+- Updated Linux install script to use new install path in `/opt` and new config path `/etc/dns` for new installations.
+- Updated Docker container to use new volume path `/etc/dns` for config.
+- Updated Docker container to correctly handle container stop event to gracefully shutdown the DNS server.
+- Updated Docker container to include `libmsquic` to allow QUIC support.
+- Multiple other minor bug fixes and improvements.
+
+## Version 11.0
+Release Date: 18 February 2023
+
+- Added support for DNS-over-QUIC (DoQ) [RFC 9250](https://www.ietf.org/rfc/rfc9250.html). This allows you to run DoQ service as well as use it with Forwarders. DoQ implementation supports running over SOCKS5 proxy server that provides UDP transport.
+- Added support for Zone Transfer over QUIC (XFR-over-QUIC) [RFC 9250](https://www.ietf.org/rfc/rfc9250.html).
+- Updated DNS-over-HTTPS protocol implementation to support HTTP/2 and HTTP/3. DNS-over-HTTP/3 can be forced by using `h3` instead of `https` scheme for the URL.
+- Updated DNS server's web service backend to use Kestrel web server and thus the DNS server now requires ASP.NET Core Runtime to be installed. With this change, the web service now supports both HTTP/2 and HTTP/3 protocols. If you are using HTTP API, it is recommended to test your code/script with the new release.
+- Added support to save DNS cache data to disk on server shutdown and to reload it at startup.
+- Updated DNS server domain name blocking feature to support Extended DNS Errors to show report on the blocked domain name. With this support added, the DNS Client tab on the web panel will show blocking report for any blocked domain name.
+- Updated DNS server domain name blocking feature to support wildcard block lists file format and Adblock Plus file format.
+- Updated DNS server to detect when an upstream server blocks a domain name to reflect it in dashboard stats and query logs. It will now detect blocking signal from Quad9 and show Extended DNS Error for it.
+- Updated web panel Zones GUI to support pagination.
+- Advanced Blocking App: Updated DNS app to support wildcard block lists file format. Updated the app to disable CNAME cloaking when a domain name is allowed in config. Implemented Extended DNS Errors support to show blocked domain report.
+- Advanced Forwarding App: Added new DNS app to support bulk conditional forwarder.
+- DNS Block List App: Added new DNS app to allow running your own DNSBL or RBL block lists [RFC 5782](https://www.rfc-editor.org/rfc/rfc5782).
+- Added support for TFTP Server Address DHCP option (150).
+- Added support for Generic DHCP option to allow configuring option currently not supported by the DHCP server.
+- Removed support for non-standard DNS-over-HTTPS (JSON) protocol.
+- Removed Newtonsoft.Json dependency from the DNS server and all DNS apps.
+- Multiple other minor bug fixes and improvements.
+
+## Version 10.0.1
+Release Date: 4 December 2022
+
+- Fixed multiple issues in EDNS Client Subnet (ECS) implementation.
+- Fixed issue with serialization when saving permission data when there are more than 255 zones.
+- Failover App: Fixed issue with idle connection for HTTP/HTTPS probes.
+- QueryLogs (Sqlite) App: Fixes issue of open db file on windows installations.
+- Multiple other minor bug fixes and improvements.
+
+## Version 10.0
+Release Date: 26 November 2022
+
+- Added Dynamic Updates [RFC 2136](https://www.rfc-editor.org/rfc/rfc2136) security policy support to allow updates only for specified domain names and record types. This adds breaking changes to the zone options HTTP API calls. Any implementation that uses the zone options API must test with new update before deploying to production.
+- Added support for DANE TLSA [RFC 6698](https://datatracker.ietf.org/doc/html/rfc6698) record type. This includes support for automatically generating the hash values using certificates in PEM format.
+- Added support for SSHFP [RFC 4255](https://www.rfc-editor.org/rfc/rfc4255.html) record type.
+- Implemented EDNS Client Subnet (ECS) [RFC 7871](https://datatracker.ietf.org/doc/html/rfc7871) support for recursive resolution and forwarding.
+- Updated HTTP API to accept date time in ISO 8601 format for dashboard and query logs API calls. Any implementation that uses these API must test with new update before deploying to production.
+- Upgraded codebase to .NET 7 runtime. If you had manually installed the DNS Server or .NET 6 Runtime earlier then you must install .NET 7 Runtime manually before upgrading the DNS server.
+- Fixed self-CNAME vulnerability [CVE-2022-48256] reported by Xiang Li, [Network and Information Security Lab, Tsinghua University](https://netsec.ccert.edu.cn/) which caused the DNS server to follow CNAME in loop causing the answer to contain couple of hundred records before the loop limit was hit.
+- Updated DNS Apps framework with `IDnsPostProcessor` interface to allow manipulating outbound responses by DNS apps.
+- NO DATA App: Added new app to allow returning NO DATA response in Conditional Forwarder zones to allow overriding existing records from the forwarder for specified record types.
+- DNS64 App: Added new app to support DNS64 function [RFC 6147](https://www.rfc-editor.org/rfc/rfc6147) for use by IPv6 only clients.
+- Advanced Blocking App: Upgraded the app code to use less memory when same block lists are used across multiple groups.
+- Geo Continent App, Geo Country App, and Geo Distance App: Upgraded the apps to support EDNS Client Subnet (ECS) [RFC 7871](https://datatracker.ietf.org/doc/html/rfc7871).
+- Split Horizon App: Upgraded the app to add 1:1 IP address translation support. This allows mapping external/public IP address to internal/private IP address such that clients in private network can access local services using internal/private IP addresses.
+- Added support for Domain Search DHCP option [RFC 3397](https://www.rfc-editor.org/rfc/rfc3397)
+- Added support for CAPWAP Access Controller DHCP option [RFC 5417](https://www.rfc-editor.org/rfc/rfc5417.html).
+- Added DHCP Scope option to disable DNS updates.
+- Added DHCP Scope option to support domain name for NTP option such that the DHCP server will automatically resolve the domain names and use the resolved IP addresses with the NTP option.
+- Multiple other minor bug fixes and improvements.
+
 ## Version 9.1
 Release Date: 9 October 2022
 

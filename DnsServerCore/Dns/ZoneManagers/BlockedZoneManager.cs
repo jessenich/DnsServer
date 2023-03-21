@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -87,16 +87,12 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
             catch (Exception ex)
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write(ex);
+                _dnsServer.LogManager?.Write(ex);
             }
 
             try
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write("DNS Server is loading blocked zone file: " + blockedZoneFile);
+                _dnsServer.LogManager?.Write("DNS Server is loading blocked zone file: " + blockedZoneFile);
 
                 using (FileStream fS = new FileStream(blockedZoneFile, FileMode.Open, FileAccess.Read))
                 {
@@ -110,9 +106,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         case 1:
                             int length = bR.ReadInt32();
+                            int i = 0;
 
-                            for (int i = 0; i < length; i++)
-                                BlockZone(bR.ReadShortString());
+                            _zoneManager.LoadSpecialPrimaryZones(delegate ()
+                            {
+                                if (i++ < length)
+                                    return bR.ReadShortString();
+
+                                return null;
+                            }, _soaRecord, _nsRecord);
 
                             break;
 
@@ -121,17 +123,19 @@ namespace DnsServerCore.Dns.ZoneManagers
                     }
                 }
 
-                if (log != null)
-                    log.Write("DNS Server blocked zone file was loaded: " + blockedZoneFile);
+                _dnsServer.LogManager?.Write("DNS Server blocked zone file was loaded: " + blockedZoneFile);
             }
             catch (FileNotFoundException)
             { }
             catch (Exception ex)
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write("DNS Server encountered an error while loading blocked zone file: " + blockedZoneFile + "\r\n" + ex.ToString());
+                _dnsServer.LogManager?.Write("DNS Server encountered an error while loading blocked zone file: " + blockedZoneFile + "\r\n" + ex.ToString());
             }
+        }
+
+        public void ImportZones(string[] domains)
+        {
+            _zoneManager.LoadSpecialPrimaryZones(domains, _soaRecord, _nsRecord);
         }
 
         public bool BlockZone(string domain)
@@ -155,14 +159,14 @@ namespace DnsServerCore.Dns.ZoneManagers
             _zoneManager.Flush();
         }
 
-        public List<AuthZoneInfo> ListZones()
+        public IReadOnlyList<AuthZoneInfo> GetAllZones()
         {
-            return _zoneManager.ListZones();
+            return _zoneManager.GetAllZones();
         }
 
         public void ListAllRecords(string domain, List<DnsResourceRecord> records)
         {
-            _zoneManager.ListAllRecords(domain, records);
+            _zoneManager.ListAllRecords(domain, domain, records);
         }
 
         public void ListSubDomains(string domain, List<string> subDomains)
@@ -172,7 +176,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public void SaveZoneFile()
         {
-            List<AuthZoneInfo> blockedZones = _dnsServer.BlockedZoneManager.ListZones();
+            IReadOnlyList<AuthZoneInfo> blockedZones = _dnsServer.BlockedZoneManager.GetAllZones();
 
             string blockedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "blocked.config");
 
@@ -189,14 +193,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                     bW.WriteShortString(zone.Name);
             }
 
-            LogManager log = _dnsServer.LogManager;
-            if (log != null)
-                log.Write("DNS Server blocked zone file was saved: " + blockedZoneFile);
+            _dnsServer.LogManager?.Write("DNS Server blocked zone file was saved: " + blockedZoneFile);
         }
 
         public DnsDatagram Query(DnsDatagram request)
         {
-            return _zoneManager.Query(request, true);
+            if (_zoneManager.TotalZones < 1)
+                return null;
+
+            return _zoneManager.Query(request, false);
         }
 
         #endregion

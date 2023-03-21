@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -27,7 +27,9 @@ using System.Text;
 using System.Threading.Tasks;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.EDnsOptions;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
+using TechnitiumLibrary.Net.Http.Client;
 
 namespace DnsServerCore.Dns.ZoneManagers
 {
@@ -35,11 +37,15 @@ namespace DnsServerCore.Dns.ZoneManagers
     {
         #region variables
 
+        readonly static char[] _popWordSeperator = new char[] { ' ', '\t' };
+
         readonly DnsServer _dnsServer;
         readonly string _localCacheFolder;
 
         readonly List<Uri> _allowListUrls = new List<Uri>();
         readonly List<Uri> _blockListUrls = new List<Uri>();
+
+        IReadOnlyDictionary<string, object> _allowListZone = new Dictionary<string, object>();
         IReadOnlyDictionary<string, List<Uri>> _blockListZone = new Dictionary<string, List<Uri>>();
 
         DnsSOARecordData _soaRecord;
@@ -87,9 +93,9 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (line.Length == 0)
                 return line;
 
-            line = line.TrimStart(' ', '\t');
+            line = line.TrimStart(_popWordSeperator);
 
-            int i = line.IndexOfAny(new char[] { ' ', '\t' });
+            int i = line.IndexOfAny(_popWordSeperator);
             string word;
 
             if (i < 0)
@@ -106,92 +112,136 @@ namespace DnsServerCore.Dns.ZoneManagers
             return word;
         }
 
-        private Queue<string> ReadListFile(Uri listUrl, bool isAllowList)
+        private Queue<string> ReadListFile(Uri listUrl, bool isAllowList, out Queue<string> exceptionDomains)
         {
             Queue<string> domains = new Queue<string>();
+            exceptionDomains = new Queue<string>();
 
             try
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write("DNS Server is reading " + (isAllowList ? "allow" : "block") + " list from: " + listUrl.AbsoluteUri);
+                _dnsServer.LogManager?.Write("DNS Server is reading " + (isAllowList ? "allow" : "block") + " list from: " + listUrl.AbsoluteUri);
 
                 using (FileStream fS = new FileStream(GetBlockListFilePath(listUrl), FileMode.Open, FileAccess.Read))
                 {
                     //parse hosts file and populate block zone
                     StreamReader sR = new StreamReader(fS, true);
+                    char[] trimSeperator = new char[] { ' ', '\t', '*', '.' };
                     string line;
                     string firstWord;
                     string secondWord;
                     string hostname;
+                    string domain;
+                    string options;
+                    int i;
 
                     while (true)
                     {
                         line = sR.ReadLine();
-                        if (line == null)
+                        if (line is null)
                             break; //eof
 
-                        line = line.TrimStart(' ', '\t');
+                        line = line.TrimStart(trimSeperator);
 
                         if (line.Length == 0)
                             continue; //skip empty line
 
-                        if (line.StartsWith("#"))
+                        if (line.StartsWith('#') || line.StartsWith("!"))
                             continue; //skip comment line
 
-                        firstWord = PopWord(ref line);
-
-                        if (line.Length == 0)
+                        if (line.StartsWith("||"))
                         {
-                            hostname = firstWord;
+                            //adblock format
+                            i = line.IndexOf('^');
+                            if (i > -1)
+                            {
+                                domain = line.Substring(2, i - 2);
+                                options = line.Substring(i + 1);
+
+                                if (((options.Length == 0) || (options.StartsWith('$') && (options.Contains("doc") || options.Contains("all")))) && DnsClient.IsDomainNameValid(domain))
+                                    domains.Enqueue(domain.ToLower());
+                            }
+                            else
+                            {
+                                domain = line.Substring(2);
+
+                                if (DnsClient.IsDomainNameValid(domain))
+                                    domains.Enqueue(domain.ToLower());
+                            }
+                        }
+                        else if (line.StartsWith("@@||"))
+                        {
+                            //adblock format - exception syntax
+                            i = line.IndexOf('^');
+                            if (i > -1)
+                            {
+                                domain = line.Substring(4, i - 4);
+                                options = line.Substring(i + 1);
+
+                                if (((options.Length == 0) || (options.StartsWith('$') && (options.Contains("doc") || options.Contains("all")))) && DnsClient.IsDomainNameValid(domain))
+                                    exceptionDomains.Enqueue(domain.ToLower());
+                            }
+                            else
+                            {
+                                domain = line.Substring(4);
+
+                                if (DnsClient.IsDomainNameValid(domain))
+                                    exceptionDomains.Enqueue(domain.ToLower());
+                            }
                         }
                         else
                         {
-                            secondWord = PopWord(ref line);
+                            //hosts file format
+                            firstWord = PopWord(ref line);
 
-                            if (secondWord.Length == 0)
+                            if (line.Length == 0)
+                            {
                                 hostname = firstWord;
+                            }
                             else
-                                hostname = secondWord;
+                            {
+                                secondWord = PopWord(ref line);
+
+                                if ((secondWord.Length == 0) || secondWord.StartsWith('#'))
+                                    hostname = firstWord;
+                                else
+                                    hostname = secondWord;
+                            }
+
+                            hostname = hostname.Trim('.').ToLower();
+
+                            switch (hostname)
+                            {
+                                case "":
+                                case "localhost":
+                                case "localhost.localdomain":
+                                case "local":
+                                case "broadcasthost":
+                                case "ip6-localhost":
+                                case "ip6-loopback":
+                                case "ip6-localnet":
+                                case "ip6-mcastprefix":
+                                case "ip6-allnodes":
+                                case "ip6-allrouters":
+                                case "ip6-allhosts":
+                                    continue; //skip these hostnames
+                            }
+
+                            if (!DnsClient.IsDomainNameValid(hostname))
+                                continue;
+
+                            if (IPAddress.TryParse(hostname, out _))
+                                continue; //skip line when hostname is IP address
+
+                            domains.Enqueue(hostname);
                         }
-
-                        hostname = hostname.Trim('.').ToLower();
-
-                        switch (hostname)
-                        {
-                            case "":
-                            case "localhost":
-                            case "localhost.localdomain":
-                            case "local":
-                            case "broadcasthost":
-                            case "ip6-localhost":
-                            case "ip6-loopback":
-                            case "ip6-localnet":
-                            case "ip6-mcastprefix":
-                            case "ip6-allnodes":
-                            case "ip6-allrouters":
-                            case "ip6-allhosts":
-                                continue; //skip these hostnames
-                        }
-
-                        if (!DnsClient.IsDomainNameValid(hostname))
-                            continue;
-
-                        if (IPAddress.TryParse(hostname, out _))
-                            continue; //skip line when hostname is IP address
-
-                        domains.Enqueue(hostname);
                     }
                 }
 
-                if (log != null)
-                    log.Write("DNS Server read " + (isAllowList ? "allow" : "block") + " list file (" + domains.Count + " domains) from: " + listUrl.AbsoluteUri);
+                _dnsServer.LogManager?.Write("DNS Server read " + (isAllowList ? "allow" : "block") + " list file (" + domains.Count + " domains) from: " + listUrl.AbsoluteUri);
             }
             catch (Exception ex)
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write("DNS Server failed to read " + (isAllowList ? "allow" : "block") + " list from: " + listUrl.AbsoluteUri + "\r\n" + ex.ToString());
+                _dnsServer.LogManager?.Write("DNS Server failed to read " + (isAllowList ? "allow" : "block") + " list from: " + listUrl.AbsoluteUri + "\r\n" + ex.ToString());
             }
 
             return domains;
@@ -218,11 +268,13 @@ namespace DnsServerCore.Dns.ZoneManagers
             return null;
         }
 
-        private static bool IsZoneAllowed(Dictionary<string, object> allowedDomains, string domain)
+        private bool IsZoneAllowed(string domain)
         {
+            domain = domain.ToLower();
+
             do
             {
-                if (allowedDomains.TryGetValue(domain, out _))
+                if (_allowListZone.TryGetValue(domain, out _))
                     return true;
 
                 domain = AuthZoneManager.GetParentZone(domain);
@@ -238,37 +290,57 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public void LoadBlockLists()
         {
-            //read all allowed domains in dictionary
-            Dictionary<string, object> allowedDomains = new Dictionary<string, object>();
+            Dictionary<Uri, Queue<string>> allowListQueues = new Dictionary<Uri, Queue<string>>(_allowListUrls.Count);
+            Dictionary<Uri, Queue<string>> blockListQueues = new Dictionary<Uri, Queue<string>>(_blockListUrls.Count);
+            int totalAllowedDomains = 0;
+            int totalBlockedDomains = 0;
 
+            //read all allow lists in a queue
             foreach (Uri allowListUrl in _allowListUrls)
             {
-                Queue<string> queue = ReadListFile(allowListUrl, true);
+                if (!allowListQueues.ContainsKey(allowListUrl))
+                {
+                    Queue<string> allowListQueue = ReadListFile(allowListUrl, true, out Queue<string> blockListQueue);
+
+                    totalAllowedDomains += allowListQueue.Count;
+                    allowListQueues.Add(allowListUrl, allowListQueue);
+
+                    totalBlockedDomains += blockListQueue.Count;
+                    blockListQueues.Add(allowListUrl, blockListQueue);
+                }
+            }
+
+            //read all block lists in a queue
+            foreach (Uri blockListUrl in _blockListUrls)
+            {
+                if (!blockListQueues.ContainsKey(blockListUrl))
+                {
+                    Queue<string> blockListQueue = ReadListFile(blockListUrl, false, out Queue<string> allowListQueue);
+
+                    totalBlockedDomains += blockListQueue.Count;
+                    blockListQueues.Add(blockListUrl, blockListQueue);
+
+                    totalAllowedDomains += allowListQueue.Count;
+                    allowListQueues.Add(blockListUrl, allowListQueue);
+                }
+            }
+
+            //load block list zone
+            Dictionary<string, object> allowListZone = new Dictionary<string, object>(totalAllowedDomains);
+
+            foreach (KeyValuePair<Uri, Queue<string>> allowListQueue in allowListQueues)
+            {
+                Queue<string> queue = allowListQueue.Value;
 
                 while (queue.Count > 0)
                 {
                     string domain = queue.Dequeue();
 
-                    allowedDomains.TryAdd(domain, null);
+                    allowListZone.TryAdd(domain, null);
                 }
             }
 
-            //read all block lists in a queue
-            Dictionary<Uri, Queue<string>> blockListQueues = new Dictionary<Uri, Queue<string>>(_blockListUrls.Count);
-            int totalDomains = 0;
-
-            foreach (Uri blockListUrl in _blockListUrls)
-            {
-                if (!blockListQueues.ContainsKey(blockListUrl))
-                {
-                    Queue<string> blockListQueue = ReadListFile(blockListUrl, false);
-                    totalDomains += blockListQueue.Count;
-                    blockListQueues.Add(blockListUrl, blockListQueue);
-                }
-            }
-
-            //load block list zone
-            Dictionary<string, List<Uri>> blockListZone = new Dictionary<string, List<Uri>>(totalDomains);
+            Dictionary<string, List<Uri>> blockListZone = new Dictionary<string, List<Uri>>(totalBlockedDomains);
 
             foreach (KeyValuePair<Uri, Queue<string>> blockListQueue in blockListQueues)
             {
@@ -277,9 +349,6 @@ namespace DnsServerCore.Dns.ZoneManagers
                 while (queue.Count > 0)
                 {
                     string domain = queue.Dequeue();
-
-                    if (IsZoneAllowed(allowedDomains, domain))
-                        continue; //domain is in allowed list so skip adding it to block list zone
 
                     if (!blockListZone.TryGetValue(domain, out List<Uri> blockLists))
                     {
@@ -291,16 +360,16 @@ namespace DnsServerCore.Dns.ZoneManagers
                 }
             }
 
-            //set new blocked zone
+            //set new allowed and blocked zones
+            _allowListZone = allowListZone;
             _blockListZone = blockListZone;
 
-            LogManager log = _dnsServer.LogManager;
-            if (log != null)
-                log.Write("DNS Server block list zone was loaded successfully.");
+            _dnsServer.LogManager?.Write("DNS Server block list zone was loaded successfully.");
         }
 
         public void Flush()
         {
+            _allowListZone = new Dictionary<string, object>();
             _blockListZone = new Dictionary<string, List<Uri>>();
         }
 
@@ -322,9 +391,9 @@ namespace DnsServerCore.Dns.ZoneManagers
                     SocketsHttpHandler handler = new SocketsHttpHandler();
                     handler.Proxy = _dnsServer.Proxy;
                     handler.UseProxy = _dnsServer.Proxy is not null;
-                    handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
+                    handler.AutomaticDecompression = DecompressionMethods.All;
 
-                    using (HttpClient http = new HttpClient(handler))
+                    using (HttpClient http = new HttpClient(new HttpClientRetryHandler(handler)))
                     {
                         if (File.Exists(listFilePath))
                             http.DefaultRequestHeaders.IfModifiedSince = File.GetLastWriteTimeUtc(listFilePath);
@@ -402,8 +471,19 @@ namespace DnsServerCore.Dns.ZoneManagers
             return downloaded || notModified;
         }
 
+        public bool IsAllowed(DnsDatagram request)
+        {
+            if (_allowListZone.Count < 1)
+                return false;
+
+            return IsZoneAllowed(request.Question[0].Name);
+        }
+
         public DnsDatagram Query(DnsDatagram request)
         {
+            if (_blockListZone.Count < 1)
+                return null;
+
             DnsQuestionRecord question = request.Question[0];
 
             List<Uri> blockLists = IsZoneBlocked(question.Name, out string blockedDomain);
@@ -419,10 +499,20 @@ namespace DnsServerCore.Dns.ZoneManagers
                 for (int i = 0; i < answer.Length; i++)
                     answer[i] = new DnsResourceRecord(question.Name, DnsResourceRecordType.TXT, question.Class, 60, new DnsTXTRecordData("source=block-list-zone; blockListUrl=" + blockLists[i].AbsoluteUri + "; domain=" + blockedDomain));
 
-                return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NoError, request.Question, answer);
+                return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, false, false, false, DnsResponseCode.NoError, request.Question, answer);
             }
             else
             {
+                EDnsOption[] options = null;
+
+                if (_dnsServer.AllowTxtBlockingReport && (request.EDNS is not null))
+                {
+                    options = new EDnsOption[blockLists.Count];
+
+                    for (int i = 0; i < options.Length; i++)
+                        options[i] = new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOptionData(EDnsExtendedDnsErrorCode.Blocked, "source=block-list-zone; blockListUrl=" + blockLists[i].AbsoluteUri + "; domain=" + blockedDomain));
+                }
+
                 IReadOnlyCollection<DnsARecordData> aRecords;
                 IReadOnlyCollection<DnsAAAARecordData> aaaaRecords;
 
@@ -443,7 +533,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         if (parentDomain is null)
                             parentDomain = string.Empty;
 
-                        return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NxDomain, request.Question, null, new DnsResourceRecord[] { new DnsResourceRecord(parentDomain, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) });
+                        return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, false, false, false, DnsResponseCode.NxDomain, request.Question, null, new DnsResourceRecord[] { new DnsResourceRecord(parentDomain, DnsResourceRecordType.SOA, question.Class, 60, _soaRecord) }, null, request.EDNS is null ? ushort.MinValue : _dnsServer.UdpPayloadSize, EDnsHeaderFlags.None, options);
 
                     default:
                         throw new InvalidOperationException();
@@ -493,7 +583,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         break;
                 }
 
-                return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, true, false, false, DnsResponseCode.NoError, request.Question, answer, authority);
+                return new DnsDatagram(request.Identifier, true, DnsOpcode.StandardQuery, false, false, request.RecursionDesired, false, false, false, DnsResponseCode.NoError, request.Question, answer, authority, null, request.EDNS is null ? ushort.MinValue : _dnsServer.UdpPayloadSize, EDnsHeaderFlags.None, options);
             }
         }
 
@@ -512,6 +602,9 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public List<Uri> BlockListUrls
         { get { return _blockListUrls; } }
+
+        public int TotalZonesAllowed
+        { get { return _allowListZone.Count; } }
 
         public int TotalZonesBlocked
         { get { return _blockListZone.Count; } }

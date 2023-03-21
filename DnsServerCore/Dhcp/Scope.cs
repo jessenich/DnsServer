@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -18,6 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 using DnsServerCore.Dhcp.Options;
+using DnsServerCore.Dns;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -33,6 +34,7 @@ using TechnitiumLibrary;
 using TechnitiumLibrary.IO;
 using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
+using TechnitiumLibrary.Net.Dns.ResourceRecords;
 
 namespace DnsServerCore.Dhcp
 {
@@ -51,12 +53,16 @@ namespace DnsServerCore.Dhcp
         byte _leaseTimeMinutes = 0;
         ushort _offerDelayTime;
 
+        readonly LogManager _log;
+
         bool _pingCheckEnabled;
         ushort _pingCheckTimeout = 1000;
         byte _pingCheckRetries = 2;
 
         //dhcp options
         string _domainName;
+        IReadOnlyCollection<string> _domainSearchList;
+        bool _dnsUpdates = true;
         uint _dnsTtl = 900;
         IPAddress _serverAddress;
         string _serverHostName;
@@ -66,10 +72,14 @@ namespace DnsServerCore.Dhcp
         IReadOnlyCollection<IPAddress> _dnsServers;
         IReadOnlyCollection<IPAddress> _winsServers;
         IReadOnlyCollection<IPAddress> _ntpServers;
+        IReadOnlyCollection<string> _ntpServerDomainNames;
         IReadOnlyCollection<ClasslessStaticRouteOption.Route> _staticRoutes;
         IReadOnlyDictionary<string, VendorSpecificInformationOption> _vendorInfo;
+        IReadOnlyCollection<IPAddress> _capwapAcIpAddresses;
+        IReadOnlyCollection<IPAddress> _tftpServerAddreses;
 
         //advanced options
+        IReadOnlyCollection<DhcpOption> _genericOptions;
         IReadOnlyCollection<Exclusion> _exclusions;
         readonly ConcurrentDictionary<ClientIdentifierOption, Lease> _reservedLeases = new ConcurrentDictionary<ClientIdentifierOption, Lease>();
         bool _allowOnlyReservedLeases;
@@ -95,7 +105,7 @@ namespace DnsServerCore.Dhcp
 
         #region constructor
 
-        public Scope(string name, bool enabled, IPAddress startingAddress, IPAddress endingAddress, IPAddress subnetMask)
+        public Scope(string name, bool enabled, IPAddress startingAddress, IPAddress endingAddress, IPAddress subnetMask, LogManager log)
         {
             ValidateScopeName(name);
 
@@ -103,9 +113,11 @@ namespace DnsServerCore.Dhcp
             _enabled = enabled;
 
             ChangeNetwork(startingAddress, endingAddress, subnetMask);
+
+            _log = log;
         }
 
-        public Scope(BinaryReader bR)
+        public Scope(BinaryReader bR, LogManager log)
         {
             if (Encoding.ASCII.GetString(bR.ReadBytes(2)) != "SC")
                 throw new InvalidDataException("DhcpServer scope file format is invalid.");
@@ -119,10 +131,12 @@ namespace DnsServerCore.Dhcp
                 case 4:
                 case 5:
                 case 6:
+                case 7:
+                case 8:
                     _name = bR.ReadShortString();
                     _enabled = bR.ReadBoolean();
 
-                    ChangeNetwork(IPAddressExtension.ReadFrom(bR), IPAddressExtension.ReadFrom(bR), IPAddressExtension.ReadFrom(bR));
+                    ChangeNetwork(IPAddressExtensions.ReadFrom(bR), IPAddressExtensions.ReadFrom(bR), IPAddressExtensions.ReadFrom(bR));
 
                     _leaseTimeDays = bR.ReadUInt16();
                     _leaseTimeHours = bR.ReadByte();
@@ -141,11 +155,27 @@ namespace DnsServerCore.Dhcp
                     if (string.IsNullOrWhiteSpace(_domainName))
                         _domainName = null;
 
+                    if (version >= 7)
+                    {
+                        int count = bR.ReadByte();
+                        if (count > 0)
+                        {
+                            string[] domainSearchStrings = new string[count];
+
+                            for (int i = 0; i < count; i++)
+                                domainSearchStrings[i] = bR.ReadShortString();
+
+                            _domainSearchList = domainSearchStrings;
+                        }
+
+                        _dnsUpdates = bR.ReadBoolean();
+                    }
+
                     _dnsTtl = bR.ReadUInt32();
 
                     if (version >= 2)
                     {
-                        _serverAddress = IPAddressExtension.ReadFrom(bR);
+                        _serverAddress = IPAddressExtensions.ReadFrom(bR);
                         if (_serverAddress.Equals(IPAddress.Any))
                             _serverAddress = null;
                     }
@@ -161,7 +191,7 @@ namespace DnsServerCore.Dhcp
                             _bootFileName = null;
                     }
 
-                    _routerAddress = IPAddressExtension.ReadFrom(bR);
+                    _routerAddress = IPAddressExtensions.ReadFrom(bR);
                     if (_routerAddress.Equals(IPAddress.Any))
                         _routerAddress = null;
 
@@ -179,7 +209,7 @@ namespace DnsServerCore.Dhcp
                                 IPAddress[] dnsServers = new IPAddress[count];
 
                                 for (int i = 0; i < count; i++)
-                                    dnsServers[i] = IPAddressExtension.ReadFrom(bR);
+                                    dnsServers[i] = IPAddressExtensions.ReadFrom(bR);
 
                                 _dnsServers = dnsServers;
                             }
@@ -193,7 +223,7 @@ namespace DnsServerCore.Dhcp
                             IPAddress[] winsServers = new IPAddress[count];
 
                             for (int i = 0; i < count; i++)
-                                winsServers[i] = IPAddressExtension.ReadFrom(bR);
+                                winsServers[i] = IPAddressExtensions.ReadFrom(bR);
 
                             _winsServers = winsServers;
                         }
@@ -206,9 +236,23 @@ namespace DnsServerCore.Dhcp
                             IPAddress[] ntpServers = new IPAddress[count];
 
                             for (int i = 0; i < count; i++)
-                                ntpServers[i] = IPAddressExtension.ReadFrom(bR);
+                                ntpServers[i] = IPAddressExtensions.ReadFrom(bR);
 
                             _ntpServers = ntpServers;
+                        }
+                    }
+
+                    if (version >= 7)
+                    {
+                        int count = bR.ReadByte();
+                        if (count > 0)
+                        {
+                            string[] ntpServerDomainNames = new string[count];
+
+                            for (int i = 0; i < count; i++)
+                                ntpServerDomainNames[i] = bR.ReadShortString();
+
+                            _ntpServerDomainNames = ntpServerDomainNames;
                         }
                     }
 
@@ -244,6 +288,54 @@ namespace DnsServerCore.Dhcp
                         }
                     }
 
+                    if (version >= 7)
+                    {
+                        int count = bR.ReadByte();
+                        if (count > 0)
+                        {
+                            IPAddress[] capwapAcIpAddresses = new IPAddress[count];
+
+                            for (int i = 0; i < count; i++)
+                                capwapAcIpAddresses[i] = IPAddressExtensions.ReadFrom(bR);
+
+                            _capwapAcIpAddresses = capwapAcIpAddresses;
+                        }
+                    }
+
+                    if (version >= 8)
+                    {
+                        int count = bR.ReadByte();
+                        if (count > 0)
+                        {
+                            IPAddress[] tftpServerAddreses = new IPAddress[count];
+
+                            for (int i = 0; i < count; i++)
+                                tftpServerAddreses[i] = IPAddressExtensions.ReadFrom(bR);
+
+                            _tftpServerAddreses = tftpServerAddreses;
+                        }
+                    }
+
+                    if (version >= 8)
+                    {
+                        int count = bR.ReadByte();
+                        if (count > 0)
+                        {
+                            DhcpOption[] genericOptions = new DhcpOption[count];
+
+                            for (int i = 0; i < count; i++)
+                            {
+                                DhcpOptionCode code = (DhcpOptionCode)bR.ReadByte();
+                                short length = bR.ReadInt16();
+                                byte[] value = bR.ReadBytes(length);
+
+                                genericOptions[i] = new DhcpOption(code, value);
+                            }
+
+                            _genericOptions = genericOptions;
+                        }
+                    }
+
                     {
                         int count = bR.ReadByte();
                         if (count > 0)
@@ -251,7 +343,7 @@ namespace DnsServerCore.Dhcp
                             Exclusion[] exclusions = new Exclusion[count];
 
                             for (int i = 0; i < count; i++)
-                                exclusions[i] = new Exclusion(IPAddressExtension.ReadFrom(bR), IPAddressExtension.ReadFrom(bR));
+                                exclusions[i] = new Exclusion(IPAddressExtensions.ReadFrom(bR), IPAddressExtensions.ReadFrom(bR));
 
                             _exclusions = exclusions;
                         }
@@ -294,6 +386,8 @@ namespace DnsServerCore.Dhcp
                 default:
                     throw new InvalidDataException("Scope data format version not supported.");
             }
+
+            _log = log;
         }
 
         #endregion
@@ -317,7 +411,7 @@ namespace DnsServerCore.Dhcp
 
         #region static
 
-        public static void ValidateScopeName(string name)
+        internal static void ValidateScopeName(string name)
         {
             foreach (char invalidChar in Path.GetInvalidFileNameChars())
             {
@@ -326,13 +420,31 @@ namespace DnsServerCore.Dhcp
             }
         }
 
-        public static bool IsAddressInRange(IPAddress address, IPAddress startingAddress, IPAddress endingAddress)
+        private static bool IsAddressInRange(IPAddress address, IPAddress startingAddress, IPAddress endingAddress)
         {
             uint addressNumber = address.ConvertIpToNumber();
             uint startingAddressNumber = startingAddress.ConvertIpToNumber();
             uint endingAddressNumber = endingAddress.ConvertIpToNumber();
 
             return (startingAddressNumber <= addressNumber) && (addressNumber <= endingAddressNumber);
+        }
+
+        private static void ValidateIpv4(IReadOnlyCollection<IPAddress> value, string paramName)
+        {
+            if (value is not null)
+            {
+                foreach (IPAddress ip in value)
+                {
+                    if (ip.AddressFamily != AddressFamily.InterNetwork)
+                        throw new ArgumentException("The address must be an IPv4 address: " + ip.ToString(), paramName);
+                }
+            }
+        }
+
+        private static void ValidateIpv4(IPAddress value, string paramName)
+        {
+            if ((value is not null) && (value.AddressFamily != AddressFamily.InterNetwork))
+                throw new ArgumentException("The address must be an IPv4 address: " + value.ToString(), paramName);
         }
 
         #endregion
@@ -457,7 +569,7 @@ namespace DnsServerCore.Dhcp
             else if (string.IsNullOrWhiteSpace(request.ClientFullyQualifiedDomainName.DomainName))
             {
                 //client domain empty and expects server for a fqdn domain name
-                if (request.HostName == null)
+                if (request.HostName is null)
                     return null; //server unable to decide a name for client
 
                 clientDomainName = request.HostName.HostName + "." + _domainName;
@@ -566,10 +678,13 @@ namespace DnsServerCore.Dhcp
                             try
                             {
                                 //check if interface has dynamic ipv4 address assigned via dhcp
-                                foreach (IPAddress dhcpServerAddress in ipInterface.DhcpServerAddresses)
+                                if (!OperatingSystem.IsMacOS())
                                 {
-                                    if (dhcpServerAddress.AddressFamily == AddressFamily.InterNetwork)
-                                        throw new DhcpServerException("DHCP Server requires static IP address to work correctly but the network interface was found to have a dynamic IP address [" + ip.Address.ToString() + "] assigned by another DHCP server: " + dhcpServerAddress.ToString());
+                                    foreach (IPAddress dhcpServerAddress in ipInterface.DhcpServerAddresses)
+                                    {
+                                        if (dhcpServerAddress.AddressFamily == AddressFamily.InterNetwork)
+                                            throw new DhcpServerException("DHCP Server requires static IP address to work correctly but the network interface was found to have a dynamic IP address [" + ip.Address.ToString() + "] assigned by another DHCP server: " + dhcpServerAddress.ToString());
+                                    }
                                 }
                             }
                             catch (PlatformNotSupportedException)
@@ -588,26 +703,29 @@ namespace DnsServerCore.Dhcp
 
             try
             {
-                //check if at least one interface has static ip address
-                foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
+                if (!OperatingSystem.IsMacOS())
                 {
-                    if (nic.OperationalStatus != OperationalStatus.Up)
-                        continue;
-
-                    IPInterfaceProperties ipInterface = nic.GetIPProperties();
-
-                    foreach (UnicastIPAddressInformation ip in ipInterface.UnicastAddresses)
+                    //check if at least one interface has static ip address
+                    foreach (NetworkInterface nic in NetworkInterface.GetAllNetworkInterfaces())
                     {
-                        if (ip.Address.AddressFamily == AddressFamily.InterNetwork)
+                        if (nic.OperationalStatus != OperationalStatus.Up)
+                            continue;
+
+                        IPInterfaceProperties ipInterface = nic.GetIPProperties();
+
+                        foreach (UnicastIPAddressInformation ip in ipInterface.UnicastAddresses)
                         {
-                            //check if address is static
-                            if (ipInterface.DhcpServerAddresses.Count < 1)
+                            if (ip.Address.AddressFamily == AddressFamily.InterNetwork)
                             {
-                                //found static ip address so this scope can be activated
-                                //using ANY ip address for this scope interface since we dont know the relay agent network 
-                                _interfaceAddress = IPAddress.Any;
-                                _interfaceIndex = -1;
-                                return true;
+                                //check if address is static
+                                if (ipInterface.DhcpServerAddresses.Count < 1)
+                                {
+                                    //found static ip address so this scope can be activated
+                                    //using ANY ip address for this scope interface since we dont know the relay agent network 
+                                    _interfaceAddress = IPAddress.Any;
+                                    _interfaceIndex = -1;
+                                    return true;
+                                }
                             }
                         }
                     }
@@ -749,7 +867,14 @@ namespace DnsServerCore.Dhcp
             {
                 //reserved address exists
                 if (IsAddressAlreadyAllocated(reservedLease.Address, clientIdentifier))
-                    return null; //reserved lease address is already allocated so ignore reserved lease
+                {
+                    //reserved lease address is already allocated so ignore reserved lease
+
+                    if (_log is not null)
+                        _log.Write("DHCP Server cannot allocate reserved lease [" + reservedLease.Address.ToString() + "] to " + BitConverter.ToString(reservedLeasesClientIdentifier.Identifier) + " for scope '" + _name + "': The IP address is already allocated.");
+
+                    return null;
+                }
 
                 return reservedLease;
             }
@@ -795,12 +920,22 @@ namespace DnsServerCore.Dhcp
             }
 
             if (_allowOnlyReservedLeases)
-                throw new DhcpServerException("DHCP Server failed to offer IP address to " + request.GetClientFullIdentifier() + ": scope allows only reserved lease allocations.");
+            {
+                if (_log is not null)
+                    _log.Write("DHCP Server failed to offer IP address to " + request.GetClientFullIdentifier() + " for scope '" + _name + "': the scope allows only reserved lease allocations.");
+
+                return null;
+            }
 
             if (_blockLocallyAdministeredMacAddresses)
             {
                 if ((request.HardwareAddressType == DhcpMessageHardwareAddressType.Ethernet) && ((request.ClientHardwareAddress[0] & 0x02) > 0))
-                    throw new DhcpServerException("DHCP Server failed to offer IP address to " + request.GetClientFullIdentifier() + ": scope does not allow locally administered MAC addresses.");
+                {
+                    if (_log is not null)
+                        _log.Write("DHCP Server failed to offer IP address to " + request.GetClientFullIdentifier() + " for scope '" + _name + "': the scope does not allow locally administered MAC addresses.");
+
+                    return null;
+                }
             }
 
             Lease dummyOffer = new Lease(LeaseType.None, null, null, null, null, null, 0);
@@ -833,7 +968,7 @@ namespace DnsServerCore.Dhcp
                 }
             }
 
-            if (offerAddress == null)
+            if (offerAddress is null)
             {
                 await _lastAddressOfferedLock.WaitAsync();
                 try
@@ -850,14 +985,19 @@ namespace DnsServerCore.Dhcp
                         if (nextOfferAddressNumber > endingAddressNumber)
                         {
                             if (offerAddressWasResetFromEnd)
-                                throw new DhcpServerException("DHCP Server failed to offer IP address to " + request.GetClientFullIdentifier() + ": address unavailable due to address pool exhaustion.");
+                            {
+                                if (_log is not null)
+                                    _log.Write("DHCP Server failed to offer IP address to " + request.GetClientFullIdentifier() + " for scope '" + _name + "': address unavailable due to address pool exhaustion.");
 
-                            offerAddress = IPAddressExtension.ConvertNumberToIp(_startingAddress.ConvertIpToNumber() - 1u);
+                                return null;
+                            }
+
+                            offerAddress = IPAddressExtensions.ConvertNumberToIp(_startingAddress.ConvertIpToNumber() - 1u);
                             offerAddressWasResetFromEnd = true;
                             continue;
                         }
 
-                        offerAddress = IPAddressExtension.ConvertNumberToIp(nextOfferAddressNumber);
+                        offerAddress = IPAddressExtensions.ConvertNumberToIp(nextOfferAddressNumber);
 
                         AddressStatus addressStatus = await IsAddressAvailableAsync(offerAddress);
                         if (addressStatus.IsAddressAvailable)
@@ -891,7 +1031,7 @@ namespace DnsServerCore.Dhcp
             return null;
         }
 
-        internal List<DhcpOption> GetOptions(DhcpMessage request, IPAddress serverIdentifierAddress, string overrideClientDomainName)
+        internal async Task<List<DhcpOption>> GetOptionsAsync(DhcpMessage request, IPAddress serverIdentifierAddress, string overrideClientDomainName, DnsServer dnsServer)
         {
             List<DhcpOption> options = new List<DhcpOption>();
 
@@ -924,7 +1064,7 @@ namespace DnsServerCore.Dhcp
                     break;
             }
 
-            if (request.ParameterRequestList == null)
+            if (request.ParameterRequestList is null)
             {
                 options.Add(new SubnetMaskOption(_subnetMask));
                 options.Add(new BroadcastAddressOption(_broadcastAddress));
@@ -937,19 +1077,22 @@ namespace DnsServerCore.Dhcp
                         options.Add(GetClientFullyQualifiedDomainNameOption(request, overrideClientDomainName));
                 }
 
-                if (_routerAddress != null)
+                if (_domainSearchList is not null)
+                    options.Add(new DomainSearchOption(_domainSearchList));
+
+                if (_routerAddress is not null)
                     options.Add(new RouterOption(new IPAddress[] { _routerAddress }));
 
-                if (_dnsServers != null)
+                if (_dnsServers is not null)
                     options.Add(new DomainNameServerOption(_dnsServers));
 
-                if (_winsServers != null)
+                if (_winsServers is not null)
                     options.Add(new NetBiosNameServerOption(_winsServers));
 
-                if (_ntpServers != null)
-                    options.Add(new NetworkTimeProtocolServersOption(_ntpServers));
+                if ((_ntpServers is not null) || (_ntpServerDomainNames is not null))
+                    options.Add(await GetNetworkTimeProtocolServersOptionAsync(dnsServer));
 
-                if (_staticRoutes != null)
+                if (_staticRoutes is not null)
                     options.Add(new ClasslessStaticRouteOption(_staticRoutes));
             }
             else
@@ -974,40 +1117,73 @@ namespace DnsServerCore.Dhcp
 
                             break;
 
+                        case DhcpOptionCode.DomainSearch:
+                            if (_domainSearchList is not null)
+                                options.Add(new DomainSearchOption(_domainSearchList));
+
+                            break;
+
                         case DhcpOptionCode.Router:
-                            if (_routerAddress != null)
+                            if (_routerAddress is not null)
                                 options.Add(new RouterOption(new IPAddress[] { _routerAddress }));
 
                             break;
 
                         case DhcpOptionCode.DomainNameServer:
-                            if (_dnsServers != null)
+                            if (_dnsServers is not null)
                                 options.Add(new DomainNameServerOption(_dnsServers));
 
                             break;
 
                         case DhcpOptionCode.NetBiosOverTcpIpNameServer:
-                            if (_winsServers != null)
+                            if (_winsServers is not null)
                                 options.Add(new NetBiosNameServerOption(_winsServers));
 
                             break;
 
                         case DhcpOptionCode.NetworkTimeProtocolServers:
-                            if (_ntpServers != null)
-                                options.Add(new NetworkTimeProtocolServersOption(_ntpServers));
+                            if ((_ntpServers is not null) || (_ntpServerDomainNames is not null))
+                                options.Add(await GetNetworkTimeProtocolServersOptionAsync(dnsServer));
 
                             break;
 
                         case DhcpOptionCode.ClasslessStaticRoute:
-                            if (_staticRoutes != null)
+                            if (_staticRoutes is not null)
                                 options.Add(new ClasslessStaticRouteOption(_staticRoutes));
+
+                            break;
+
+                        case DhcpOptionCode.CAPWAPAccessControllerAddresses:
+                            if (_capwapAcIpAddresses is not null)
+                                options.Add(new CAPWAPAccessControllerOption(_capwapAcIpAddresses));
+
+                            break;
+
+                        case DhcpOptionCode.TftpServerAddress:
+                            if (_tftpServerAddreses is not null)
+                                options.Add(new TftpServerAddressOption(_tftpServerAddreses));
+
+                            break;
+
+                        default:
+                            if (_genericOptions is not null)
+                            {
+                                foreach (DhcpOption genericOption in _genericOptions)
+                                {
+                                    if (optionCode == genericOption.Code)
+                                    {
+                                        options.Add(genericOption);
+                                        break;
+                                    }
+                                }
+                            }
 
                             break;
                     }
                 }
             }
 
-            if ((_vendorInfo != null) && (request.VendorClassIdentifier != null))
+            if ((_vendorInfo is not null) && (request.VendorClassIdentifier is not null))
             {
                 if (_vendorInfo.TryGetValue(request.VendorClassIdentifier.Identifier, out VendorSpecificInformationOption vendorSpecificInformationOption) || _vendorInfo.TryGetValue("", out vendorSpecificInformationOption))
                 {
@@ -1037,6 +1213,9 @@ namespace DnsServerCore.Dhcp
                             if (!int.TryParse(parts[1], out int length))
                                 continue;
 
+                            if ((startIndex + length) > request.VendorClassIdentifier.Identifier.Length)
+                                continue;
+
                             int j = entry.Key.IndexOf("==", i);
                             if (j < i)
                                 continue;
@@ -1059,6 +1238,39 @@ namespace DnsServerCore.Dhcp
             options.Add(DhcpOption.CreateEndOption());
 
             return options;
+        }
+
+        private async Task<NetworkTimeProtocolServersOption> GetNetworkTimeProtocolServersOptionAsync(DnsServer dnsServer)
+        {
+            if (_ntpServerDomainNames is not null)
+            {
+                Task<DnsDatagram>[] tasks = new Task<DnsDatagram>[_ntpServerDomainNames.Count];
+                int i = 0;
+
+                foreach (string ntpServerDomainName in _ntpServerDomainNames)
+                    tasks[i++] = dnsServer.DirectQueryAsync(new DnsQuestionRecord(ntpServerDomainName, DnsResourceRecordType.A, DnsClass.IN), 1000);
+
+                List<IPAddress> ntpServers = new List<IPAddress>(_ntpServerDomainNames.Count + (_ntpServers is null ? 0 : _ntpServers.Count));
+
+                if (_ntpServers is not null)
+                    ntpServers.AddRange(_ntpServers);
+
+                foreach (Task<DnsDatagram> task in tasks)
+                {
+                    try
+                    {
+                        ntpServers.AddRange(DnsClient.ParseResponseA(await task));
+                    }
+                    catch
+                    { }
+                }
+
+                return new NetworkTimeProtocolServersOption(ntpServers);
+            }
+            else
+            {
+                return new NetworkTimeProtocolServersOption(_ntpServers);
+            }
         }
 
         internal void CommitLease(Lease lease)
@@ -1131,13 +1343,13 @@ namespace DnsServerCore.Dhcp
         public void ChangeNetwork(IPAddress startingAddress, IPAddress endingAddress, IPAddress subnetMask)
         {
             if (startingAddress.AddressFamily != AddressFamily.InterNetwork)
-                throw new ArgumentException("Address family not supported.", nameof(startingAddress));
+                throw new ArgumentException("The address must be an IPv4 address: " + startingAddress.ToString(), nameof(startingAddress));
 
             if (endingAddress.AddressFamily != AddressFamily.InterNetwork)
-                throw new ArgumentException("Address family not supported.", nameof(endingAddress));
+                throw new ArgumentException("The address must be an IPv4 address: " + endingAddress.ToString(), nameof(endingAddress));
 
             if (subnetMask.AddressFamily != AddressFamily.InterNetwork)
-                throw new ArgumentException("Address family not supported.", nameof(subnetMask));
+                throw new ArgumentException("The address must be an IPv4 address: " + subnetMask.ToString(), nameof(subnetMask));
 
             uint startingAddressNumber = startingAddress.ConvertIpToNumber();
             uint endingAddressNumber = endingAddress.ConvertIpToNumber();
@@ -1160,13 +1372,13 @@ namespace DnsServerCore.Dhcp
             if (broadcastAddressNumber == endingAddressNumber)
                 throw new ArgumentException("Ending address cannot be same as the broadcast address.");
 
-            _networkAddress = IPAddressExtension.ConvertNumberToIp(networkAddressNumber);
-            _broadcastAddress = IPAddressExtension.ConvertNumberToIp(broadcastAddressNumber);
+            _networkAddress = IPAddressExtensions.ConvertNumberToIp(networkAddressNumber);
+            _broadcastAddress = IPAddressExtensions.ConvertNumberToIp(broadcastAddressNumber);
 
             _lastAddressOfferedLock.Wait();
             try
             {
-                _lastAddressOffered = IPAddressExtension.ConvertNumberToIp(startingAddressNumber - 1u);
+                _lastAddressOffered = IPAddressExtensions.ConvertNumberToIp(startingAddressNumber - 1u);
             }
             finally
             {
@@ -1275,7 +1487,7 @@ namespace DnsServerCore.Dhcp
         public void WriteTo(BinaryWriter bW)
         {
             bW.Write(Encoding.ASCII.GetBytes("SC"));
-            bW.Write((byte)6); //version
+            bW.Write((byte)8); //version
 
             bW.WriteShortString(_name);
             bW.Write(_enabled);
@@ -1296,9 +1508,22 @@ namespace DnsServerCore.Dhcp
             else
                 bW.WriteShortString(_domainName);
 
+            if (_domainSearchList is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_domainSearchList.Count));
+
+                foreach (string domainSearchString in _domainSearchList)
+                    bW.WriteShortString(domainSearchString);
+            }
+
+            bW.Write(_dnsUpdates);
             bW.Write(_dnsTtl);
 
-            if (_serverAddress == null)
+            if (_serverAddress is null)
                 IPAddress.Any.WriteTo(bW);
             else
                 _serverAddress.WriteTo(bW);
@@ -1313,7 +1538,7 @@ namespace DnsServerCore.Dhcp
             else
                 bW.WriteShortString(_bootFileName);
 
-            if (_routerAddress == null)
+            if (_routerAddress is null)
                 IPAddress.Any.WriteTo(bW);
             else
                 _routerAddress.WriteTo(bW);
@@ -1322,7 +1547,7 @@ namespace DnsServerCore.Dhcp
             {
                 bW.Write((byte)255);
             }
-            else if (_dnsServers == null)
+            else if (_dnsServers is null)
             {
                 bW.Write((byte)0);
             }
@@ -1334,7 +1559,7 @@ namespace DnsServerCore.Dhcp
                     dnsServer.WriteTo(bW);
             }
 
-            if (_winsServers == null)
+            if (_winsServers is null)
             {
                 bW.Write((byte)0);
             }
@@ -1346,7 +1571,7 @@ namespace DnsServerCore.Dhcp
                     winsServer.WriteTo(bW);
             }
 
-            if (_ntpServers == null)
+            if (_ntpServers is null)
             {
                 bW.Write((byte)0);
             }
@@ -1358,7 +1583,19 @@ namespace DnsServerCore.Dhcp
                     ntpServer.WriteTo(bW);
             }
 
-            if (_staticRoutes == null)
+            if (_ntpServerDomainNames is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_ntpServerDomainNames.Count));
+
+                foreach (string ntpServerDomainName in _ntpServerDomainNames)
+                    bW.WriteShortString(ntpServerDomainName);
+            }
+
+            if (_staticRoutes is null)
             {
                 bW.Write((byte)0);
             }
@@ -1370,7 +1607,7 @@ namespace DnsServerCore.Dhcp
                     route.WriteTo(bW.BaseStream);
             }
 
-            if (_vendorInfo == null)
+            if (_vendorInfo is null)
             {
                 bW.Write((byte)0);
             }
@@ -1385,7 +1622,47 @@ namespace DnsServerCore.Dhcp
                 }
             }
 
-            if (_exclusions == null)
+            if (_capwapAcIpAddresses is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_capwapAcIpAddresses.Count));
+
+                foreach (IPAddress capwapAcIpAddress in _capwapAcIpAddresses)
+                    capwapAcIpAddress.WriteTo(bW);
+            }
+
+            if (_tftpServerAddreses is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_tftpServerAddreses.Count));
+
+                foreach (IPAddress tftpServerAddress in _tftpServerAddreses)
+                    tftpServerAddress.WriteTo(bW);
+            }
+
+            if (_genericOptions is null)
+            {
+                bW.Write((byte)0);
+            }
+            else
+            {
+                bW.Write(Convert.ToByte(_genericOptions.Count));
+
+                foreach (DhcpOption genericOption in _genericOptions)
+                {
+                    bW.Write((byte)genericOption.Code);
+                    bW.Write(Convert.ToInt16(genericOption.RawValue.Length));
+                    bW.Write(genericOption.RawValue);
+                }
+            }
+
+            if (_exclusions is null)
             {
                 bW.Write((byte)0);
             }
@@ -1554,6 +1831,27 @@ namespace DnsServerCore.Dhcp
             }
         }
 
+        public IReadOnlyCollection<string> DomainSearchList
+        {
+            get { return _domainSearchList; }
+            set
+            {
+                if (value is not null)
+                {
+                    foreach (string domainSearchString in value)
+                        DnsClient.IsDomainNameValid(domainSearchString, true);
+                }
+
+                _domainSearchList = value;
+            }
+        }
+
+        public bool DnsUpdates
+        {
+            get { return _dnsUpdates; }
+            set { _dnsUpdates = value; }
+        }
+
         public uint DnsTtl
         {
             get { return _dnsTtl; }
@@ -1563,7 +1861,11 @@ namespace DnsServerCore.Dhcp
         public IPAddress ServerAddress
         {
             get { return _serverAddress; }
-            set { _serverAddress = value; }
+            set
+            {
+                ValidateIpv4(value, nameof(ServerAddress));
+                _serverAddress = value;
+            }
         }
 
         public string ServerHostName
@@ -1593,7 +1895,11 @@ namespace DnsServerCore.Dhcp
         public IPAddress RouterAddress
         {
             get { return _routerAddress; }
-            set { _routerAddress = value; }
+            set
+            {
+                ValidateIpv4(value, nameof(RouterAddress));
+                _routerAddress = value;
+            }
         }
 
         public bool UseThisDnsServer
@@ -1613,6 +1919,7 @@ namespace DnsServerCore.Dhcp
             get { return _dnsServers; }
             set
             {
+                ValidateIpv4(value, nameof(DnsServers));
                 _dnsServers = value;
 
                 if ((_dnsServers != null) && _dnsServers.Count > 0)
@@ -1623,13 +1930,36 @@ namespace DnsServerCore.Dhcp
         public IReadOnlyCollection<IPAddress> WinsServers
         {
             get { return _winsServers; }
-            set { _winsServers = value; }
+            set
+            {
+                ValidateIpv4(value, nameof(WinsServers));
+                _winsServers = value;
+            }
         }
 
         public IReadOnlyCollection<IPAddress> NtpServers
         {
             get { return _ntpServers; }
-            set { _ntpServers = value; }
+            set
+            {
+                ValidateIpv4(value, nameof(NtpServers));
+                _ntpServers = value;
+            }
+        }
+
+        public IReadOnlyCollection<string> NtpServerDomainNames
+        {
+            get { return _ntpServerDomainNames; }
+            set
+            {
+                if (value is not null)
+                {
+                    foreach (string ntpServerDomainName in value)
+                        DnsClient.IsDomainNameValid(ntpServerDomainName, true);
+                }
+
+                _ntpServerDomainNames = value;
+            }
         }
 
         public IReadOnlyCollection<ClasslessStaticRouteOption.Route> StaticRoutes
@@ -1644,12 +1974,38 @@ namespace DnsServerCore.Dhcp
             set { _vendorInfo = value; }
         }
 
+        public IReadOnlyCollection<IPAddress> CAPWAPAcIpAddresses
+        {
+            get { return _capwapAcIpAddresses; }
+            set
+            {
+                ValidateIpv4(value, nameof(CAPWAPAcIpAddresses));
+                _capwapAcIpAddresses = value;
+            }
+        }
+
+        public IReadOnlyCollection<IPAddress> TftpServerAddresses
+        {
+            get { return _tftpServerAddreses; }
+            set
+            {
+                ValidateIpv4(value, nameof(TftpServerAddresses));
+                _tftpServerAddreses = value;
+            }
+        }
+
+        public IReadOnlyCollection<DhcpOption> GenericOptions
+        {
+            get { return _genericOptions; }
+            set { _genericOptions = value; }
+        }
+
         public IReadOnlyCollection<Exclusion> Exclusions
         {
             get { return _exclusions; }
             set
             {
-                if (value == null)
+                if (value is null)
                 {
                     _exclusions = null;
                 }
@@ -1683,7 +2039,7 @@ namespace DnsServerCore.Dhcp
             }
             set
             {
-                if (value == null)
+                if (value is null)
                 {
                     _reservedLeases.Clear();
                 }

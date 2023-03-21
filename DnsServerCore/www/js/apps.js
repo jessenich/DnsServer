@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -56,7 +56,7 @@ function refreshApps() {
 }
 
 function getAppRowId(appName) {
-    return appName.replace(/ /g, "");
+    return btoa(appName).replace(/=/g, "");
 }
 
 function getAppRowHtml(app) {
@@ -70,28 +70,31 @@ function getAppRowHtml(app) {
 
     //dnsApps
     if (app.dnsApps.length > 0) {
-        dnsAppsTable = "<table class=\"table\"><thead><th>Class Path</th><th>Description</th></thead><tbody>";
+        dnsAppsTable = "<table class=\"table\" style=\"margin-bottom: 10px; background: transparent;\"><thead><th>Class Path</th><th>Description</th></thead><tbody>";
 
         for (var j = 0; j < app.dnsApps.length; j++) {
             var labels = "";
             var description = null;
 
             if (app.dnsApps[j].isAppRecordRequestHandler) {
-                labels += "<span class=\"label label-info\">APP Record</span>";
+                labels += "<span class=\"label label-info\" style=\"margin-right: 4px;\">APP Record</span>";
                 description = "<p>" + htmlEncode(app.dnsApps[j].description).replace(/\n/g, "<br />") + "</p>" + (app.dnsApps[j].recordDataTemplate == null ? "" : "<div><b>Record Data Template</b><pre>" + htmlEncode(app.dnsApps[j].recordDataTemplate) + "</pre></div>");
             }
 
             if (app.dnsApps[j].isRequestController)
-                labels += "<span class=\"label label-info\">Access Control</span>";
+                labels += "<span class=\"label label-info\" style=\"margin-right: 4px;\">Access Control</span>";
 
             if (app.dnsApps[j].isAuthoritativeRequestHandler)
-                labels += "<span class=\"label label-info\">Authoritative</span>";
+                labels += "<span class=\"label label-info\" style=\"margin-right: 4px;\">Authoritative</span>";
 
             if (app.dnsApps[j].isQueryLogger)
-                labels += "<span class=\"label label-info\">Query Logs</span>";
+                labels += "<span class=\"label label-info\" style=\"margin-right: 4px;\">Query Logs</span>";
+
+            if (app.dnsApps[j].isPostProcessor)
+                labels += "<span class=\"label label-info\" style=\"margin-right: 4px;\">Post Processor</span>";
 
             if (labels == "")
-                labels = "<span class=\"label label-info\">Generic</span>";
+                labels = "<span class=\"label label-info\" style=\"margin-right: 4px;\">Generic</span>";
 
             if (description == null)
                 description = htmlEncode(app.dnsApps[j].description).replace(/\n/g, "<br />");
@@ -103,10 +106,17 @@ function getAppRowHtml(app) {
     }
 
     var id = getAppRowId(name);
-    var tableHtmlRow = "<tr id=\"trApp" + id + "\"><td><div style=\"margin-bottom: 20px;\"><span style=\"font-weight: bold; font-size: 16px;\">" + htmlEncode(name) + "</span><br /><span id=\"trAppVersion" + id + "\" class=\"label label-primary\">Version " + htmlEncode(version) + "</span> <span id=\"trAppUpdateVersion" + id + "\" class=\"label label-warning\" style=\"" + (updateAvailable ? "" : "display: none;") + "\">Update " + htmlEncode(updateVersion) + "</span></div>";
+    var tableHtmlRow = "<tr id=\"trApp" + id + "\"><td><div><span style=\"font-weight: bold; font-size: 16px;\">" + htmlEncode(name) + "</span><br /><span id=\"trAppVersion" + id + "\" class=\"label label-primary\">Version " + htmlEncode(version) + "</span> <span id=\"trAppUpdateVersion" + id + "\" class=\"label label-warning\" style=\"" + (updateAvailable ? "" : "display: none;") + "\">Update " + htmlEncode(updateVersion) + "</span></div>";
 
-    if (dnsAppsTable != null)
+    if (app.description != null)
+        tableHtmlRow += "<div style=\"margin-top: 10px;\">" + htmlEncode(app.description).replace(/\n/g, "<br />") + "</div>";
+
+    if (dnsAppsTable != null) {
+        tableHtmlRow += "<div style=\"margin-top: 10px;\"><a href=\"#" + id + "\" class=\"collapsed\" data-toggle=\"collapse\" aria-expanded=\"false\" aria-controls=\"" + id + "\">More Details <span class=\"glyphicon glyphicon-chevron-down\" style=\"font-size: 10px;\" aria-hidden=\"true\"></span></a>";
+        tableHtmlRow += "<div id=\"" + id + "\" class=\"collapse\" aria-expanded=\"false\">";
         tableHtmlRow += dnsAppsTable;
+        tableHtmlRow += "</div></div>";
+    }
 
     tableHtmlRow += "</td>";
     tableHtmlRow += "<td><button type=\"button\" class=\"btn btn-default\" style=\"font-size: 12px; padding: 2px 0px; width: 80px; margin-bottom: 6px; display: block;\" onclick=\"showAppConfigModal(this, '" + name + "');\" data-loading-text=\"Loading...\">Config</button>";
@@ -332,7 +342,9 @@ function installApp() {
 
     HTTPRequest({
         url: "/api/apps/install?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
+        method: "POST",
         data: formData,
+        dataContentType: false,
         processData: false,
         success: function (responseJSON) {
             $("#modalInstallApp").modal("hide");
@@ -372,7 +384,9 @@ function updateApp() {
 
     HTTPRequest({
         url: "/api/apps/update?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
+        method: "POST",
         data: formData,
+        dataContentType: false,
         processData: false,
         success: function (responseJSON) {
             $("#modalUpdateApp").modal("hide");
@@ -469,6 +483,7 @@ function saveAppConfig() {
 
     HTTPRequest({
         url: "/api/apps/config/set?token=" + sessionData.token + "&name=" + encodeURIComponent(appName),
+        method: "POST",
         data: "config=" + encodeURIComponent(config),
         processData: false,
         success: function (responseJSON) {

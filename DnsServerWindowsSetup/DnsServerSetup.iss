@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Technitium DNS Server"
-#define MyAppVersion "9.1"
+#define MyAppVersion "11.0.3"
 #define MyAppPublisher "Technitium"
 #define MyAppURL "https://technitium.com/dns/"
 #define MyAppExeName "DnsServerSystemTrayApp.exe"
@@ -18,8 +18,8 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-VersionInfoVersion=2.0.0.0
-VersionInfoCopyright="Copyright (C) 2022 Technitium"
+VersionInfoVersion=2.2.0.0
+VersionInfoCopyright="Copyright (C) 2023 Technitium"
 DefaultDirName={commonpf32}\Technitium\DNS Server
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
@@ -104,6 +104,9 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then //Step happens before processing uninstall log
   begin
+    UninstallProgressForm.StatusLabel.Caption := 'Resetting Network DNS...';
+    ResetNetworkDNS(); //Reset Network DNS to default
+
     UninstallProgressForm.StatusLabel.Caption := 'Stopping Tray App...';
     KillTrayApp(); //Stop the tray app if running
 

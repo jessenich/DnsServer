@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -76,9 +76,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             try
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write("DNS Server is loading allowed zone file: " + allowedZoneFile);
+                _dnsServer.LogManager?.Write("DNS Server is loading allowed zone file: " + allowedZoneFile);
 
                 using (FileStream fS = new FileStream(allowedZoneFile, FileMode.Open, FileAccess.Read))
                 {
@@ -92,9 +90,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                     {
                         case 1:
                             int length = bR.ReadInt32();
+                            int i = 0;
 
-                            for (int i = 0; i < length; i++)
-                                AllowZone(bR.ReadShortString());
+                            _zoneManager.LoadSpecialPrimaryZones(delegate ()
+                            {
+                                if (i++ < length)
+                                    return bR.ReadShortString();
+
+                                return null;
+                            }, _soaRecord, _nsRecord);
 
                             break;
 
@@ -103,17 +107,19 @@ namespace DnsServerCore.Dns.ZoneManagers
                     }
                 }
 
-                if (log != null)
-                    log.Write("DNS Server allowed zone file was loaded: " + allowedZoneFile);
+                _dnsServer.LogManager?.Write("DNS Server allowed zone file was loaded: " + allowedZoneFile);
             }
             catch (FileNotFoundException)
             { }
             catch (Exception ex)
             {
-                LogManager log = _dnsServer.LogManager;
-                if (log != null)
-                    log.Write("DNS Server encountered an error while loading allowed zone file: " + allowedZoneFile + "\r\n" + ex.ToString());
+                _dnsServer.LogManager?.Write("DNS Server encountered an error while loading allowed zone file: " + allowedZoneFile + "\r\n" + ex.ToString());
             }
+        }
+
+        public void ImportZones(string[] domains)
+        {
+            _zoneManager.LoadSpecialPrimaryZones(domains, _soaRecord, _nsRecord);
         }
 
         public bool AllowZone(string domain)
@@ -137,14 +143,14 @@ namespace DnsServerCore.Dns.ZoneManagers
             _zoneManager.Flush();
         }
 
-        public List<AuthZoneInfo> ListZones()
+        public IReadOnlyList<AuthZoneInfo> GetAllZones()
         {
-            return _zoneManager.ListZones();
+            return _zoneManager.GetAllZones();
         }
 
         public void ListAllRecords(string domain, List<DnsResourceRecord> records)
         {
-            _zoneManager.ListAllRecords(domain, records);
+            _zoneManager.ListAllRecords(domain, domain, records);
         }
 
         public void ListSubDomains(string domain, List<string> subDomains)
@@ -154,7 +160,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         public void SaveZoneFile()
         {
-            List<AuthZoneInfo> allowedZones = _dnsServer.AllowedZoneManager.ListZones();
+            IReadOnlyList<AuthZoneInfo> allowedZones = _dnsServer.AllowedZoneManager.GetAllZones();
 
             string allowedZoneFile = Path.Combine(_dnsServer.ConfigFolder, "allowed.config");
 
@@ -171,14 +177,15 @@ namespace DnsServerCore.Dns.ZoneManagers
                     bW.WriteShortString(zone.Name);
             }
 
-            LogManager log = _dnsServer.LogManager;
-            if (log != null)
-                log.Write("DNS Server allowed zone file was saved: " + allowedZoneFile);
+            _dnsServer.LogManager?.Write("DNS Server allowed zone file was saved: " + allowedZoneFile);
         }
 
-        public DnsDatagram Query(DnsDatagram request)
+        public bool IsAllowed(DnsDatagram request)
         {
-            return _zoneManager.Query(request, true);
+            if (_zoneManager.TotalZones < 1)
+                return false;
+
+            return _zoneManager.Query(request, false) is not null;
         }
 
         #endregion

@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -53,6 +53,11 @@ namespace DnsServerCore.Dns.Applications
             return _dnsServer.DirectQueryAsync(question, timeout, true);
         }
 
+        public Task<DnsDatagram> DirectQueryAsync(DnsDatagram request, int timeout = 4000)
+        {
+            return _dnsServer.DirectQueryAsync(request, timeout, true);
+        }
+
         public void WriteLog(string message)
         {
             LogManager log = _dnsServer.LogManager;
@@ -88,6 +93,9 @@ namespace DnsServerCore.Dns.Applications
 
         public bool PreferIPv6
         { get { return _dnsServer.PreferIPv6; } }
+
+        public ushort UdpPayloadSize
+        { get { return _dnsServer.UdpPayloadSize; } }
 
         #endregion
     }

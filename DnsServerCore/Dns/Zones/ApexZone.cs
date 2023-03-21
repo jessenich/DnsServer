@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -66,7 +66,7 @@ namespace DnsServerCore.Dns.Zones
         protected IReadOnlyCollection<IPAddress> _updateIpAddresses;
         protected List<DnsResourceRecord> _zoneHistory; //for IXFR support
         protected IReadOnlyDictionary<string, object> _zoneTransferTsigKeyNames;
-        protected IReadOnlyDictionary<string, object> _updateTsigKeyNames;
+        protected IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<DnsResourceRecordType>>> _updateSecurityPolicies;
         protected AuthZoneDnssecStatus _dnssecStatus;
 
         Timer _notifyTimer;
@@ -99,7 +99,7 @@ namespace DnsServerCore.Dns.Zones
                 _zoneHistory = new List<DnsResourceRecord>(zoneInfo.ZoneHistory);
 
             _zoneTransferTsigKeyNames = zoneInfo.ZoneTransferTsigKeyNames;
-            _updateTsigKeyNames = zoneInfo.UpdateTsigKeyNames;
+            _updateSecurityPolicies = zoneInfo.UpdateSecurityPolicies;
         }
 
         protected ApexZone(string name)
@@ -146,7 +146,7 @@ namespace DnsServerCore.Dns.Zones
             while (index < history.Count)
             {
                 //check difference sequence
-                if (history[index].GetDeletedOn() > expiry)
+                if (history[index].GetAuthRecordInfo().DeletedOn > expiry)
                     break; //found record to keep
 
                 //skip to next difference sequence
@@ -207,7 +207,7 @@ namespace DnsServerCore.Dns.Zones
                 //notify all secondary name servers
                 foreach (DnsResourceRecord nsRecord in nsRecords)
                 {
-                    if (nsRecord.IsDisabled())
+                    if (nsRecord.GetAuthRecordInfo().Disabled)
                         continue;
 
                     string nameServerHost = (nsRecord.RDATA as DnsNSRecordData).NameServer;
@@ -378,12 +378,7 @@ namespace DnsServerCore.Dns.Zones
                         _notifyFailed.Add(nameServerHost);
                 }
 
-                LogManager log = dnsServer.LogManager;
-                if (log is not null)
-                {
-                    log.Write("DNS Server failed to notify name server '" + nameServerHost + "' for zone: " + (_name == "" ? "<root>" : _name));
-                    log.Write(ex);
-                }
+                dnsServer.LogManager?.Write("DNS Server failed to notify name server '" + nameServerHost + "' for zone: " + (_name == "" ? "<root>" : _name) + "\r\n" + ex.ToString());
             }
             finally
             {
@@ -430,8 +425,8 @@ namespace DnsServerCore.Dns.Zones
         {
             string nsDomain = (nsRecord.RDATA as DnsNSRecordData).NameServer;
 
-            IReadOnlyList<DnsResourceRecord> glueRecords = nsRecord.GetGlueRecords();
-            if (glueRecords.Count > 0)
+            IReadOnlyList<DnsResourceRecord> glueRecords = nsRecord.GetAuthRecordInfo().GlueRecords;
+            if (glueRecords is not null)
             {
                 foreach (DnsResourceRecord glueRecord in glueRecords)
                 {
@@ -514,8 +509,8 @@ namespace DnsServerCore.Dns.Zones
         {
             DnsResourceRecord soaRecord = _entries[DnsResourceRecordType.SOA][0];
 
-            IReadOnlyList<NameServerAddress> primaryNameServers = soaRecord.GetPrimaryNameServers();
-            if (primaryNameServers.Count > 0)
+            IReadOnlyList<NameServerAddress> primaryNameServers = soaRecord.GetAuthRecordInfo().PrimaryNameServers;
+            if (primaryNameServers is not null)
             {
                 List<NameServerAddress> resolvedNameServers = new List<NameServerAddress>(primaryNameServers.Count * 2);
 
@@ -537,7 +532,7 @@ namespace DnsServerCore.Dns.Zones
 
             foreach (DnsResourceRecord nsRecord in nsRecords)
             {
-                if (nsRecord.IsDisabled())
+                if (nsRecord.GetAuthRecordInfo().Disabled)
                     continue;
 
                 if (primaryNameServer.Equals((nsRecord.RDATA as DnsNSRecordData).NameServer, StringComparison.OrdinalIgnoreCase))
@@ -563,7 +558,7 @@ namespace DnsServerCore.Dns.Zones
 
             foreach (DnsResourceRecord nsRecord in nsRecords)
             {
-                if (nsRecord.IsDisabled())
+                if (nsRecord.GetAuthRecordInfo().Disabled)
                     continue;
 
                 if (primaryNameServer.Equals((nsRecord.RDATA as DnsNSRecordData).NameServer, StringComparison.OrdinalIgnoreCase))
@@ -658,10 +653,10 @@ namespace DnsServerCore.Dns.Zones
             set { _zoneTransferTsigKeyNames = value; }
         }
 
-        public IReadOnlyDictionary<string, object> UpdateTsigKeyNames
+        public IReadOnlyDictionary<string, IReadOnlyDictionary<string, IReadOnlyList<DnsResourceRecordType>>> UpdateSecurityPolicies
         {
-            get { return _updateTsigKeyNames; }
-            set { _updateTsigKeyNames = value; }
+            get { return _updateSecurityPolicies; }
+            set { _updateSecurityPolicies = value; }
         }
 
         public bool NotifyFailed

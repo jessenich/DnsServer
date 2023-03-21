@@ -1,6 +1,6 @@
 ﻿/*
 Technitium DNS Server
-Copyright (C) 2022  Shreyas Zare (shreyas@technitium.com)
+Copyright (C) 2023  Shreyas Zare (shreyas@technitium.com)
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
@@ -22,7 +22,10 @@ using DnsServerCore.Dns.Trees;
 using DnsServerCore.Dns.Zones;
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Text;
 using System.Threading;
+using TechnitiumLibrary.Net;
 using TechnitiumLibrary.Net.Dns;
 using TechnitiumLibrary.Net.Dns.EDnsOptions;
 using TechnitiumLibrary.Net.Dns.ResourceRecords;
@@ -70,14 +73,21 @@ namespace DnsServerCore.Dns.ZoneManagers
                 IReadOnlyList<DnsResourceRecord> glueRecords = GetGlueRecordsFrom(resourceRecord);
                 IReadOnlyList<DnsResourceRecord> rrsigRecords = GetRRSIGRecordsFrom(resourceRecord);
                 IReadOnlyList<DnsResourceRecord> nsecRecords = GetNSECRecordsFrom(resourceRecord);
+                NetworkAddress eDnsClientSubnet;
 
-                if ((glueRecords is not null) || (rrsigRecords is not null) || (nsecRecords is not null))
+                if (CacheZone.IsTypeSupportedForEDnsClientSubnet(resourceRecord.Type))
+                    eDnsClientSubnet = GetEDnsClientSubnetFrom(resourceRecord);
+                else
+                    eDnsClientSubnet = null;
+
+                if ((glueRecords is not null) || (rrsigRecords is not null) || (nsecRecords is not null) || (eDnsClientSubnet is not null))
                 {
-                    DnsResourceRecordInfo rrInfo = resourceRecord.GetRecordInfo();
+                    CacheRecordInfo rrInfo = resourceRecord.GetCacheRecordInfo();
 
                     rrInfo.GlueRecords = glueRecords;
                     rrInfo.RRSIGRecords = rrsigRecords;
                     rrInfo.NSECRecords = nsecRecords;
+                    rrInfo.EDnsClientSubnet = eDnsClientSubnet;
 
                     if (glueRecords is not null)
                     {
@@ -85,7 +95,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         {
                             IReadOnlyList<DnsResourceRecord> glueRRSIGRecords = GetRRSIGRecordsFrom(glueRecord);
                             if (glueRRSIGRecords is not null)
-                                glueRecord.GetRecordInfo().RRSIGRecords = glueRRSIGRecords;
+                                glueRecord.GetCacheRecordInfo().RRSIGRecords = glueRRSIGRecords;
                         }
                     }
 
@@ -95,7 +105,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         {
                             IReadOnlyList<DnsResourceRecord> nsecRRSIGRecords = GetRRSIGRecordsFrom(nsecRecord);
                             if (nsecRRSIGRecords is not null)
-                                nsecRecord.GetRecordInfo().RRSIGRecords = nsecRRSIGRecords;
+                                nsecRecord.GetCacheRecordInfo().RRSIGRecords = nsecRRSIGRecords;
                         }
                     }
                 }
@@ -171,7 +181,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         private static IReadOnlyList<DnsResourceRecord> AddDSRecordsTo(CacheZone delegation, bool serveStale, IReadOnlyList<DnsResourceRecord> nsRecords)
         {
-            IReadOnlyList<DnsResourceRecord> records = delegation.QueryRecords(DnsResourceRecordType.DS, serveStale, true);
+            IReadOnlyList<DnsResourceRecord> records = delegation.QueryRecords(DnsResourceRecordType.DS, serveStale, true, null);
             if ((records.Count > 0) && (records[0].Type == DnsResourceRecordType.DS))
             {
                 List<DnsResourceRecord> newNSRecords = new List<DnsResourceRecord>(nsRecords.Count + records.Count);
@@ -183,7 +193,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
 
             //no DS records found check for NSEC records
-            IReadOnlyList<DnsResourceRecord> nsecRecords = nsRecords[0].GetRecordInfo().NSECRecords;
+            IReadOnlyList<DnsResourceRecord> nsecRecords = nsRecords[0].GetCacheRecordInfo().NSECRecords;
             if (nsecRecords is not null)
             {
                 List<DnsResourceRecord> newNSRecords = new List<DnsResourceRecord>(nsRecords.Count + nsecRecords.Count);
@@ -207,7 +217,7 @@ namespace DnsServerCore.Dns.ZoneManagers
             {
                 newAnswerList.Add(record);
 
-                DnsResourceRecordInfo rrInfo = record.GetRecordInfo();
+                CacheRecordInfo rrInfo = record.GetCacheRecordInfo();
 
                 IReadOnlyList<DnsResourceRecord> rrsigRecords = rrInfo.RRSIGRecords;
                 if (rrsigRecords is not null)
@@ -230,7 +240,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                             {
                                 newAuthorityList.Add(nsecRecord);
 
-                                IReadOnlyList<DnsResourceRecord> nsecRRSIGRecords = nsecRecord.GetRecordInfo().RRSIGRecords;
+                                IReadOnlyList<DnsResourceRecord> nsecRRSIGRecords = nsecRecord.GetCacheRecordInfo().RRSIGRecords;
                                 if (nsecRRSIGRecords is not null)
                                     newAuthorityList.AddRange(nsecRRSIGRecords);
                             }
@@ -243,25 +253,40 @@ namespace DnsServerCore.Dns.ZoneManagers
             newAuthority = newAuthorityList;
         }
 
-        private void ResolveCNAME(DnsQuestionRecord question, DnsResourceRecord lastCNAME, bool serveStale, List<DnsResourceRecord> answerRecords)
+        private void ResolveCNAME(DnsQuestionRecord question, DnsResourceRecord lastCNAME, bool serveStale, NetworkAddress eDnsClientSubnet, List<DnsResourceRecord> answerRecords)
         {
             int queryCount = 0;
 
             do
             {
-                if (!_root.TryGet((lastCNAME.RDATA as DnsCNAMERecordData).Domain, out CacheZone cacheZone))
+                string cnameDomain = (lastCNAME.RDATA as DnsCNAMERecordData).Domain;
+                if (lastCNAME.Name.Equals(cnameDomain, StringComparison.OrdinalIgnoreCase))
+                    break; //loop detected
+
+                if (!_root.TryGet(cnameDomain, out CacheZone cacheZone))
                     break;
 
-                IReadOnlyList<DnsResourceRecord> records = cacheZone.QueryRecords(question.Type, serveStale, true);
+                IReadOnlyList<DnsResourceRecord> records = cacheZone.QueryRecords(question.Type, serveStale, true, eDnsClientSubnet);
                 if (records.Count < 1)
                     break;
 
-                answerRecords.AddRange(records);
-
                 DnsResourceRecord lastRR = records[records.Count - 1];
-
                 if (lastRR.Type != DnsResourceRecordType.CNAME)
+                {
+                    answerRecords.AddRange(records);
                     break;
+                }
+
+                foreach (DnsResourceRecord answerRecord in answerRecords)
+                {
+                    if (answerRecord.Type != DnsResourceRecordType.CNAME)
+                        continue;
+
+                    if (answerRecord.RDATA.Equals(lastRR.RDATA))
+                        return; //loop detected
+                }
+
+                answerRecords.AddRange(records);
 
                 lastCNAME = lastRR;
             }
@@ -276,7 +301,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             if (DnsClient.IsDomainNameValid(result))
             {
-                DnsResourceRecord cnameRR = new DnsResourceRecord(question.Name, DnsResourceRecordType.CNAME, question.Class, dnameRR.TtlValue, new DnsCNAMERecordData(result));
+                DnsResourceRecord cnameRR = new DnsResourceRecord(question.Name, DnsResourceRecordType.CNAME, question.Class, dnameRR.TTL, new DnsCNAMERecordData(result));
 
                 List<DnsResourceRecord> list = new List<DnsResourceRecord>(5)
                 {
@@ -284,7 +309,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     cnameRR
                 };
 
-                ResolveCNAME(question, cnameRR, serveStale, list);
+                ResolveCNAME(question, cnameRR, serveStale, null, list);
 
                 newAnswer = list;
                 return true;
@@ -332,8 +357,8 @@ namespace DnsServerCore.Dns.ZoneManagers
 
         private void ResolveAdditionalRecords(DnsResourceRecord refRecord, string domain, bool serveStale, bool dnssecOk, List<DnsResourceRecord> additionalRecords)
         {
-            IReadOnlyList<DnsResourceRecord> glueRecords = refRecord.GetGlueRecords();
-            if (glueRecords.Count > 0)
+            IReadOnlyList<DnsResourceRecord> glueRecords = refRecord.GetCacheRecordInfo().GlueRecords;
+            if (glueRecords is not null)
             {
                 bool added = false;
 
@@ -346,7 +371,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                         if (dnssecOk)
                         {
-                            IReadOnlyList<DnsResourceRecord> rrsigRecords = glueRecord.GetRecordInfo().RRSIGRecords;
+                            IReadOnlyList<DnsResourceRecord> rrsigRecords = glueRecord.GetCacheRecordInfo().RRSIGRecords;
                             if (rrsigRecords is not null)
                                 additionalRecords.AddRange(rrsigRecords);
                         }
@@ -360,13 +385,13 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (_root.TryGet(domain, out CacheZone cacheZone))
             {
                 {
-                    IReadOnlyList<DnsResourceRecord> records = cacheZone.QueryRecords(DnsResourceRecordType.A, serveStale, true);
+                    IReadOnlyList<DnsResourceRecord> records = cacheZone.QueryRecords(DnsResourceRecordType.A, serveStale, true, null);
                     if ((records.Count > 0) && (records[0].Type == DnsResourceRecordType.A))
                         additionalRecords.AddRange(records);
                 }
 
                 {
-                    IReadOnlyList<DnsResourceRecord> records = cacheZone.QueryRecords(DnsResourceRecordType.AAAA, serveStale, true);
+                    IReadOnlyList<DnsResourceRecord> records = cacheZone.QueryRecords(DnsResourceRecordType.AAAA, serveStale, true, null);
                     if ((records.Count > 0) && (records[0].Type == DnsResourceRecordType.AAAA))
                         additionalRecords.AddRange(records);
                 }
@@ -461,6 +486,26 @@ namespace DnsServerCore.Dns.ZoneManagers
             }
         }
 
+        public void DeleteEDnsClientSubnetData()
+        {
+            int removedEntries = 0;
+
+            foreach (CacheZone zone in _root)
+            {
+                removedEntries += zone.DeleteEDnsClientSubnetData();
+
+                if (zone.IsEmpty)
+                    _root.TryRemove(zone.Name, out _); //remove empty zone
+            }
+
+            if (removedEntries > 0)
+            {
+                long totalEntries = Interlocked.Add(ref _totalEntries, -removedEntries);
+                if (totalEntries < 0)
+                    Interlocked.Add(ref _totalEntries, -totalEntries);
+            }
+        }
+
         public override void Flush()
         {
             _root.Clear();
@@ -510,7 +555,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                     return null;
 
                 //return closest name servers in delegation
-                IReadOnlyList<DnsResourceRecord> closestAuthority = delegation.QueryRecords(DnsResourceRecordType.NS, false, true);
+                IReadOnlyList<DnsResourceRecord> closestAuthority = delegation.QueryRecords(DnsResourceRecordType.NS, false, true, null);
                 if ((closestAuthority.Count > 0) && (closestAuthority[0].Type == DnsResourceRecordType.NS) && (closestAuthority[0].Name.Length > 0)) //dont trust root name servers from cache!
                 {
                     if (request.DnssecOk)
@@ -544,6 +589,13 @@ namespace DnsServerCore.Dns.ZoneManagers
         {
             DnsQuestionRecord question = request.Question[0];
 
+            NetworkAddress eDnsClientSubnet = null;
+            {
+                EDnsClientSubnetOptionData requestECS = request.GetEDnsClientSubnetOption();
+                if (requestECS is not null)
+                    eDnsClientSubnet = new NetworkAddress(requestECS.Address, requestECS.SourcePrefixLength);
+            }
+
             CacheZone zone;
             CacheZone closest = null;
             CacheZone delegation = null;
@@ -561,13 +613,13 @@ namespace DnsServerCore.Dns.ZoneManagers
             if (zone is not null)
             {
                 //zone found
-                IReadOnlyList<DnsResourceRecord> answer = zone.QueryRecords(question.Type, serveStaleAndResetExpiry, false);
+                IReadOnlyList<DnsResourceRecord> answer = zone.QueryRecords(question.Type, serveStaleAndResetExpiry, false, eDnsClientSubnet);
                 if (answer.Count > 0)
                 {
                     //answer found in cache
                     DnsResourceRecord firstRR = answer[0];
 
-                    if (firstRR.RDATA is DnsSpecialCacheRecord dnsSpecialCacheRecord)
+                    if (firstRR.RDATA is DnsSpecialCacheRecordData dnsSpecialCacheRecord)
                     {
                         if (request.DnssecOk)
                         {
@@ -602,15 +654,42 @@ namespace DnsServerCore.Dns.ZoneManagers
                             newOptions.AddRange(dnsSpecialCacheRecord.EDnsOptions);
 
                             if (dnsSpecialCacheRecord.RCODE == DnsResponseCode.NxDomain)
-                                newOptions.Add(new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOption(EDnsExtendedDnsErrorCode.StaleNxDomainAnswer, null)));
+                                newOptions.Add(new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOptionData(EDnsExtendedDnsErrorCode.StaleNxDomainAnswer, null)));
                             else
-                                newOptions.Add(new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOption(EDnsExtendedDnsErrorCode.StaleAnswer, null)));
+                                newOptions.Add(new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOptionData(EDnsExtendedDnsErrorCode.StaleAnswer, null)));
 
                             specialOptions = newOptions;
                         }
                         else
                         {
                             specialOptions = dnsSpecialCacheRecord.EDnsOptions;
+                        }
+
+                        if (eDnsClientSubnet is not null)
+                        {
+                            EDnsClientSubnetOptionData requestECS = request.GetEDnsClientSubnetOption(true);
+                            if (requestECS is not null)
+                            {
+                                NetworkAddress recordECS = firstRR.GetCacheRecordInfo().EDnsClientSubnet;
+                                if (recordECS is not null)
+                                {
+                                    EDnsOption[] ecsOption = EDnsClientSubnetOptionData.GetEDnsClientSubnetOption(requestECS.SourcePrefixLength, recordECS.PrefixLength, requestECS.Address);
+
+                                    if ((specialOptions is null) || (specialOptions.Count == 0))
+                                    {
+                                        specialOptions = ecsOption;
+                                    }
+                                    else
+                                    {
+                                        List<EDnsOption> newOptions = new List<EDnsOption>(specialOptions.Count + 1);
+
+                                        newOptions.AddRange(specialOptions);
+                                        newOptions.Add(ecsOption[0]);
+
+                                        specialOptions = newOptions;
+                                    }
+                                }
+                            }
                         }
 
                         if (request.DnssecOk)
@@ -645,7 +724,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                         List<DnsResourceRecord> newAnswers = new List<DnsResourceRecord>(answer.Count + 3);
                         newAnswers.AddRange(answer);
 
-                        ResolveCNAME(question, lastRR, serveStaleAndResetExpiry, newAnswers);
+                        ResolveCNAME(question, lastRR, serveStaleAndResetExpiry, eDnsClientSubnet, newAnswers);
 
                         answer = newAnswers;
                     }
@@ -679,7 +758,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                             break;
                     }
 
-                    EDnsOption[] options = null;
+                    IReadOnlyList<EDnsOption> options = null;
 
                     if (serveStaleAndResetExpiry)
                     {
@@ -698,7 +777,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                             }
                         }
 
-                        options = new EDnsOption[] { new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOption(EDnsExtendedDnsErrorCode.StaleAnswer, null)) };
+                        options = new EDnsOption[] { new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOptionData(EDnsExtendedDnsErrorCode.StaleAnswer, null)) };
                     }
                     else
                     {
@@ -706,8 +785,46 @@ namespace DnsServerCore.Dns.ZoneManagers
                         {
                             if (record.WasExpiryReset)
                             {
-                                options = new EDnsOption[] { new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOption(EDnsExtendedDnsErrorCode.StaleAnswer, null)) };
+                                options = new EDnsOption[] { new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOptionData(EDnsExtendedDnsErrorCode.StaleAnswer, null)) };
                                 break;
+                            }
+                        }
+                    }
+
+                    if (eDnsClientSubnet is not null)
+                    {
+                        EDnsClientSubnetOptionData requestECS = request.GetEDnsClientSubnetOption(true);
+                        if (requestECS is not null)
+                        {
+                            NetworkAddress suitableECS = null;
+
+                            foreach (DnsResourceRecord record in answer)
+                            {
+                                NetworkAddress recordECS = record.GetCacheRecordInfo().EDnsClientSubnet;
+                                if (recordECS is not null)
+                                {
+                                    if ((suitableECS is null) || (recordECS.PrefixLength > suitableECS.PrefixLength))
+                                        suitableECS = recordECS;
+                                }
+                            }
+
+                            if (suitableECS is not null)
+                            {
+                                EDnsOption[] ecsOption = EDnsClientSubnetOptionData.GetEDnsClientSubnetOption(requestECS.SourcePrefixLength, suitableECS.PrefixLength, requestECS.Address);
+
+                                if (options is null)
+                                {
+                                    options = ecsOption;
+                                }
+                                else
+                                {
+                                    List<EDnsOption> newOptions = new List<EDnsOption>(options.Count + 1);
+
+                                    newOptions.AddRange(options);
+                                    newOptions.Add(ecsOption[0]);
+
+                                    options = newOptions;
+                                }
                             }
                         }
                     }
@@ -721,7 +838,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                 //check for DNAME in closest zone
                 if (closest is not null)
                 {
-                    IReadOnlyList<DnsResourceRecord> answer = closest.QueryRecords(DnsResourceRecordType.DNAME, serveStaleAndResetExpiry, true);
+                    IReadOnlyList<DnsResourceRecord> answer = closest.QueryRecords(DnsResourceRecordType.DNAME, serveStaleAndResetExpiry, true, null);
                     if ((answer.Count > 0) && (answer[0].Type == DnsResourceRecordType.DNAME))
                     {
                         DnsResponseCode rCode;
@@ -759,7 +876,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                                     record.ResetExpiry(30); //reset expiry by 30 seconds so that resolver tries again only after 30 seconds as per draft-ietf-dnsop-serve-stale-04
                             }
 
-                            options = new EDnsOption[] { new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOption(EDnsExtendedDnsErrorCode.StaleAnswer, null)) };
+                            options = new EDnsOption[] { new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOptionData(EDnsExtendedDnsErrorCode.StaleAnswer, null)) };
                         }
                         else
                         {
@@ -767,7 +884,7 @@ namespace DnsServerCore.Dns.ZoneManagers
                             {
                                 if (record.WasExpiryReset)
                                 {
-                                    options = new EDnsOption[] { new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOption(EDnsExtendedDnsErrorCode.StaleAnswer, null)) };
+                                    options = new EDnsOption[] { new EDnsOption(EDnsOptionCode.EXTENDED_DNS_ERROR, new EDnsExtendedDnsErrorOptionData(EDnsExtendedDnsErrorCode.StaleAnswer, null)) };
                                     break;
                                 }
                             }
@@ -799,7 +916,7 @@ namespace DnsServerCore.Dns.ZoneManagers
 
                 while (true)
                 {
-                    IReadOnlyList<DnsResourceRecord> closestAuthority = delegation.QueryRecords(DnsResourceRecordType.NS, serveStaleAndResetExpiry, true);
+                    IReadOnlyList<DnsResourceRecord> closestAuthority = delegation.QueryRecords(DnsResourceRecordType.NS, serveStaleAndResetExpiry, true, null);
                     if ((closestAuthority.Count > 0) && (closestAuthority[0].Type == DnsResourceRecordType.NS) && (closestAuthority[0].Name.Length > 0)) //dont trust root name servers from cache!
                     {
                         if (request.DnssecOk)
@@ -833,6 +950,85 @@ namespace DnsServerCore.Dns.ZoneManagers
 
             //no cached delegation found
             return null;
+        }
+
+        public void LoadCacheZoneFile()
+        {
+            string cacheZoneFile = Path.Combine(_dnsServer.ConfigFolder, "cache.bin");
+
+            if (!File.Exists(cacheZoneFile))
+                return;
+
+            _dnsServer.LogManager?.Write("Loading DNS Cache from disk...");
+
+            using (FileStream fS = new FileStream(cacheZoneFile, FileMode.Open, FileAccess.Read))
+            {
+                BinaryReader bR = new BinaryReader(fS);
+
+                if (Encoding.ASCII.GetString(bR.ReadBytes(2)) != "CZ")
+                    throw new InvalidDataException("CacheZoneManager format is invalid.");
+
+                int version = bR.ReadByte();
+                switch (version)
+                {
+                    case 1:
+                        int addedEntries = 0;
+
+                        try
+                        {
+                            bool serveStale = _dnsServer.ServeStale;
+
+                            while (bR.BaseStream.Position < bR.BaseStream.Length)
+                            {
+                                CacheZone zone = CacheZone.ReadFrom(bR, serveStale);
+                                if (!zone.IsEmpty)
+                                {
+                                    if (_root.TryAdd(zone.Name, zone))
+                                        addedEntries += zone.TotalEntries;
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            if (addedEntries > 0)
+                                Interlocked.Add(ref _totalEntries, addedEntries);
+                        }
+                        break;
+
+                    default:
+                        throw new InvalidDataException("CacheZoneManager format version not supported: " + version);
+                }
+            }
+
+            _dnsServer.LogManager?.Write("DNS Cache was loaded from disk successfully.");
+        }
+
+        public void SaveCacheZoneFile()
+        {
+            _dnsServer.LogManager?.Write("Saving DNS Cache to disk...");
+
+            string cacheZoneFile = Path.Combine(_dnsServer.ConfigFolder, "cache.bin");
+
+            using (FileStream fS = new FileStream(cacheZoneFile, FileMode.Create, FileAccess.Write))
+            {
+                BinaryWriter bW = new BinaryWriter(fS);
+
+                bW.Write(Encoding.ASCII.GetBytes("CZ")); //format
+                bW.Write((byte)1); //version
+
+                foreach (CacheZone zone in _root)
+                    zone.WriteTo(bW);
+            }
+
+            _dnsServer.LogManager?.Write("DNS Cache was saved to disk successfully.");
+        }
+
+        public void DeleteCacheZoneFile()
+        {
+            string cacheZoneFile = Path.Combine(_dnsServer.ConfigFolder, "cache.bin");
+
+            if (File.Exists(cacheZoneFile))
+                File.Delete(cacheZoneFile);
         }
 
         #endregion
